@@ -1,0 +1,50 @@
+prog = decl*
+decl = function | ...
+type = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
+function = type identifier '(' paramlist ')' block
+identifier = [A-Za-z][A-Za-z0-9_]*
+paramlist = paramlist ',' type identifier | type identifier | ε
+block = '{' stmtlist '}'
+stmtlist = stmtlist stmt | ε
+stmt = declaration | block | expression ';' | conditional | loop | ret ';'
+declaration = type identifier optassign ';'
+optassign = '=' expression | ε
+loop = 'while' '(' expression ')' block
+conditional = 'if' '(' expression ')' block elsecondition
+elseconditional = 'else' block | ε
+ret = 'return' expression
+expression = expression ',' assignment | assignment
+assignment = identifier '=' assignment | identifier '+=' assignop |
+             identifier '-=' assignop | identifier '*=' assignop |
+             identifier '/=' assignop | identifier '%=' assignop | logicor
+logicor = logicor '||' logicand | logicand
+logicand = logicand '&&' eqcomp | eqcomp
+eqcomp = eqcomp '==' ordcomp | eqcomp '!=' orcomp | ordcomp
+ordcomp = orcomp '<' addition | ordcomp '>' addition | ordcomp '<=' addition | ordcomp '>=' addition | addition
+addition = addition '+' multiplication | addition '-' multiplication | multiplication
+multiplication = multiplication '*' uneg | multiplication '/' uneg | multiplication '%' uneg | uneg
+uneg = '-' baseexpr | baseexpr
+baseexpr = identifier '(' arglist ')' | identifier | constant | '(' expression ')'
+constant = 'true' | 'false' | number
+number = -?[0-9]+\.[0-9]*
+
+
+
+
+
+operator precedence (low to high):
+=
++= -=
+*= /= %=
+||
+&&
+== !=
+< <=
+> >=
++ -
+* / %
+- (unary negate)
+() (function call)
+
+
+
