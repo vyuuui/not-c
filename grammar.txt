@@ -1,34 +1,34 @@
-prog = decl*
-decl = function | ...
-type = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
+prog = function+
 function = type identifier '(' paramlist ')' block
-identifier = [A-Za-z][A-Za-z0-9_]*
-paramlist = paramlist ',' type identifier | type identifier | ε
-block = '{' stmtlist '}'
-stmtlist = stmtlist stmt | ε
-stmt = declaration | block | expression ';' | conditional | loop | ret ';'
-declaration = type identifier optassign ';'
+paramlist = type identifier (',' type identifier)* | ε
+block = '{' stmt* '}'
+stmt = declaration ';' | block | expression ';' | conditional | loop | ret ';'
+declaration = type identifier optassign
 optassign = '=' expression | ε
 loop = 'while' '(' expression ')' block
-conditional = 'if' '(' expression ')' block elsecondition
+conditional = 'if' '(' expression ')' block elseconditional
 elseconditional = 'else' block | ε
 ret = 'return' expression
-expression = expression ',' assignment | assignment
-assignment = identifier '=' assignment | identifier '+=' assignop |
-             identifier '-=' assignop | identifier '*=' assignop |
-             identifier '/=' assignop | identifier '%=' assignop | logicor
-logicor = logicor '||' logicand | logicand
-logicand = logicand '&&' eqcomp | eqcomp
-eqcomp = eqcomp '==' ordcomp | eqcomp '!=' orcomp | ordcomp
-ordcomp = orcomp '<' addition | ordcomp '>' addition | ordcomp '<=' addition | ordcomp '>=' addition | addition
-addition = addition '+' multiplication | addition '-' multiplication | multiplication
-multiplication = multiplication '*' uneg | multiplication '/' uneg | multiplication '%' uneg | uneg
+expression = assignment
+assignment = identifier '=' assignment  | identifier '+=' assignment |
+             identifier '-=' assignment | identifier '*=' assignment |
+             identifier '/=' assignment | identifier '%=' assignment | logicor
+logicor = logicand ('||' logicand)*
+logicand = eqcomp ('&&' eqcomp)*
+eqcomp = ordcomp ('==' ordcomp)* | ordcomp ('!=' orcomp)*
+ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' addition)* | addition ('>=' addition)*
+addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
+multiplication = uneg ('*' uneg)* | uneg ('/' uneg)* | uneg ('%' uneg)*
 uneg = '-' baseexpr | baseexpr
 baseexpr = identifier '(' arglist ')' | identifier | constant | '(' expression ')'
+arglist = expression (',' expression)* | ε
+
+
+
+type = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
 constant = 'true' | 'false' | number
 number = -?[0-9]+\.[0-9]*
-
-
+identifier = [A-Za-z][A-Za-z0-9_]*
 
 
 
