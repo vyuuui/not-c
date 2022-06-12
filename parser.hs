@@ -450,9 +450,6 @@ parseArgList state
         Just (argList ++ [syntaxTree], list2)
     parseRemainingArgs = iterateUntilM (not . punctuationMatches "," . head . snd) parseRemainingArgsIter
 
-
--- func(1, xyz, 3 + 4)
-
 {-
 prog = function+
 function = type identifier '(' paramlist ')' block
