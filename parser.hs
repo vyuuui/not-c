@@ -1,6 +1,11 @@
 module Parser
-(
-
+( SyntaxNode(..)
+, BinaryOp(..)
+, UnaryOp(..)
+, Program
+, ArgumentList
+, ParseState
+, parseProg
 ) where
 
 import qualified Data.Set as S
@@ -12,8 +17,6 @@ import Control.Monad.Loops ( iterateUntilM )
 import Lexer
 import System.IO
 
-data VarInfo = FunctionVar [(String, String)] | PrimitiveVar String String
-data Environment = EnvLink (M.Map String VarInfo) Environment | EnvBase (M.Map String VarInfo)
 
 type Program = [SyntaxNode];
 
@@ -73,11 +76,6 @@ type ParseResult = (SyntaxNode, ParseState)
 scanToken :: ParseState -> Maybe (Token, ParseState)
 scanToken []    = Nothing
 scanToken state = return (head state, tail state)
-
--- parseProg :: ParseState -> Maybe ParseResult
--- parseProg state = until (\(parser, node) -> null parser)
---                         (\(node, state) -> parseFunction state)
---                         (state, [])
 
 isIdentifier :: Token -> Bool
 isIdentifier (Identifier _) = True
