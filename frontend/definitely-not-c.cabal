@@ -23,7 +23,7 @@ executable definitely-not-c
     ghc-options:      -dynamic
 
     -- Modules included in this executable, other than Main.
-    other-modules: Lexer, Parser
+    other-modules: Lexer, Parser, Generator
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:

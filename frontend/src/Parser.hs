@@ -2,10 +2,12 @@ module Parser
 ( SyntaxNode(..)
 , BinaryOp(..)
 , UnaryOp(..)
+, AssignmentOp(..)
 , Program
 , ArgumentList
 , ParseState
 , parseProg
+, loadAndParse
 ) where
 
 import qualified Data.Set as S
@@ -57,7 +59,7 @@ data BinaryOp
     | LessThanOrEqual
     | Or
     | And
-    deriving Show
+    deriving (Show, Eq)
 
 data AssignmentOp
     = NoOp
@@ -66,9 +68,12 @@ data AssignmentOp
     | MulEq
     | DivEq
     | ModEq
-    deriving Show
+    deriving (Show, Eq)
 
-data UnaryOp = Negate deriving Show
+data UnaryOp
+    = Negate
+    | Not
+    deriving (Show, Eq)
 
 type ParseState = [Token]
 type ParseResult = (SyntaxNode, ParseState)
@@ -135,13 +140,14 @@ extractInner (Control s)     = s
 extractInner (Punctuation s) = s
 extractInner _               = error "Invalid call"
 
-loadAndPrint :: String -> IO ()
-loadAndPrint file = do
+loadAndParse :: String -> IO Program
+loadAndParse file = do
     handle <- openFile file ReadMode
     contents <- hGetContents handle
     let tokens = lexString contents
-    print $ parseProg tokens
-    
+    case parseProg tokens of
+        Just prog -> return prog
+        Nothing -> error "Bad program nat!"
 
 parseProg :: ParseState -> Maybe Program
 parseProg state = fmap fst (
@@ -281,8 +287,9 @@ parseDeclaration state = do
 parseReturn :: ParseState -> Maybe ParseResult
 parseReturn state = do
     (_, state) <- validateStr (controlMatches "return") (scanToken state)
-    (expressionNode, state) <- parseExpression state
-    Just (ReturnNode expressionNode, state)
+    case parseExpression state of 
+        Just (expressionNode, state) -> Just (ReturnNode expressionNode, state)
+        Nothing -> Just (ReturnNode EmptyNode, state)
 
 parseExpression :: ParseState -> Maybe ParseResult
 parseExpression = parseAssignment
@@ -402,6 +409,9 @@ parseUneg paramState = do
                 | operatorMatches "-" eqToken -> do 
                     (node, state) <- parseBaseExpr state
                     Just (UnaryOpNode Negate node, state)
+                | operatorMatches "!" eqToken -> do 
+                    (node, state) <- parseBaseExpr state
+                    Just (UnaryOpNode Not node, state)
                 | otherwise                    -> do 
                     parseBaseExpr paramState
 

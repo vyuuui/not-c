@@ -11,14 +11,12 @@ bool check(float x, float y) {
 }
 
 int mult(float z) {
-    z *= 6.0;
+    z *= 5.0;
     return z;
 }
 
 void main() {
-    if (check(1.5, 2.1)) {
-        check(mult(5), 5);
-    } else {
-        add(0, 1);
+    if (check(0.5, 2.1)) {
+        check((4), 5.0);
     }
 }

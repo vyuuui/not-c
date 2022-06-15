@@ -32,7 +32,7 @@ data Token
 type LexerResult = (Token, String)
 
 operators :: S.Set String
-operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"]
+operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!"]
 
 allOperatorChars :: S.Set Char
 allOperatorChars = S.foldr (S.union . S.fromList) S.empty operators
