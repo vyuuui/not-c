@@ -6,7 +6,7 @@ import qualified Data.Map as M
 import qualified Data.List as L
 import Data.Maybe
 import Control.Monad
-import Control.Monad.Loops ( iterateUntilM, whileM_, whileM )
+import Control.Monad.Loops ( iterateUntilM, whileM_, whileM, untilM )
 import Control.Monad.Trans
 import Control.Monad.Trans.State.Lazy
 import Lexer
@@ -82,12 +82,65 @@ scanToken = do
         put (tail tokList, funcList)
         return $ head tokList
 
+eatToken :: ParseState ()
+eatToken = do
+    (tokList, funcList) <- get
+    if null tokList
+      then raiseFailure
+      else do
+        put (tail tokList, funcList)
+        return ()
+
 peekToken :: ParseState Token
 peekToken = do
     (tokList, funcList) <- get
     if null tokList
       then raiseFailure
       else return $ head tokList
+
+-- Helper to unwrap the String part of certain tokens
+-- error should never be hit, as below helpers should avoid invalid calls
+extractInner :: Token -> String
+extractInner (Identifier s)  = s
+extractInner (TypeName s)    = s
+extractInner (Operator s)    = s
+extractInner (Control s)     = s
+extractInner (Punctuation s) = s
+extractInner _               = error "Invalid call"
+
+-- Generic helpers to validate a token given a predicate (and extract)
+extractStrIfValid :: (Token -> Bool) -> Token -> ParseState String
+extractStrIfValid check token =
+    if check token
+      then return (extractInner token)
+      else raiseFailure
+checkTokenPredicate :: (Token -> Bool) -> Token -> ParseState ()
+checkTokenPredicate check token = unless (check token) raiseFailure
+
+-- Helpers to validate several tokens, raises error if validation fails
+extractTypeNameIfValid :: Token -> ParseState String
+extractTypeNameIfValid = extractStrIfValid isTypeName
+extractIdentifierIfValid :: Token -> ParseState String
+extractIdentifierIfValid = extractStrIfValid isIdentifier
+validatePunctuation :: String -> Token -> ParseState ()
+validatePunctuation val = checkTokenPredicate (punctuationMatches val)
+validateControl :: String -> Token -> ParseState ()
+validateControl val = checkTokenPredicate (controlMatches val)
+validateOperator :: String -> Token -> ParseState ()
+validateOperator val = checkTokenPredicate (operatorMatches val)
+
+-- Helpers to consume a specific token (and extract contents for id/type)
+scanIdentifier :: ParseState String
+scanIdentifier = scanToken >>= extractIdentifierIfValid
+scanTypeName :: ParseState String
+scanTypeName = scanToken >>= extractTypeNameIfValid
+eatPunctuation :: String -> ParseState ()
+eatPunctuation val = scanToken >>= validatePunctuation val
+eatControl :: String -> ParseState ()
+eatControl val = scanToken >>= validateControl val
+eatOperator :: String -> ParseState ()
+eatOperator val = scanToken >>= validateOperator val
+
 
 shouldContinueParse :: ParseState Bool
 shouldContinueParse = do
@@ -109,43 +162,14 @@ parseProg initialList =
     initialState = (initialList, [])
     whatToExecute = whileM_ shouldContinueParse parseAndInsertFunction
 
-extractInner :: Token -> String
-extractInner (Identifier s)  = s
-extractInner (TypeName s)    = s
-extractInner (Operator s)    = s
-extractInner (Control s)     = s
-extractInner (Punctuation s) = s
-extractInner _               = error "Invalid call"
-
-validateStr :: (Token -> Bool) -> Token -> ParseState String
-validateStr check token =
-    if check token
-      then return (extractInner token)
-      else raiseFailure
-
-validateStrTypeName :: Token -> ParseState String
-validateStrTypeName = validateStr isTypeName
-
-validateStrIdentifier :: Token -> ParseState String
-validateStrIdentifier = validateStr isIdentifier
-
-validatePunctuation :: String -> Token -> ParseState String
-validatePunctuation val = validateStr (punctuationMatches val)
-
-validateControl :: String -> Token -> ParseState String
-validateControl val = validateStr (controlMatches val)
-
-validateOperator :: String -> Token -> ParseState String
-validateOperator val = validateStr (operatorMatches val)
-
 -- Return a parsed function as a SyntaxNode
 parseFunction :: ParseState SyntaxNode
 parseFunction = do
-    typeName <- scanToken >>= validateStrTypeName
-    id <- scanToken >>= validateStrIdentifier
-    scanToken >>= validatePunctuation "("
+    typeName <- scanTypeName
+    id <- scanIdentifier
+    eatPunctuation "("
     paramList <- parseParamList
-    scanToken >>= validatePunctuation ")"
+    eatPunctuation ")"
     blockNode <- parseBlock
     return $ FunctionDefinitionNode typeName id paramList blockNode
 
@@ -158,78 +182,79 @@ parseParamList = do
       then doActualParseParamList
       else return []
   where
+    -- Parses the full param list, given there is at least one parameter
     doActualParseParamList :: ParseState ParameterList
     doActualParseParamList = do
-        typeName <- scanToken >>= validateStrTypeName
-        id <- scanToken >>= validateStrIdentifier
-        fmap ((typeName, id):) (whileM (fmap (punctuationMatches ",") peekToken) parseCommaParamList)
+        typeName <- scanTypeName
+        id <- scanIdentifier
+        ((typeName, id):) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaParam
       where
-        parseCommaParamList :: ParseState (String, String)
-        parseCommaParamList = do
-            typeName <- scanToken >> scanToken >>= validateStrTypeName
-            id <- scanToken >>= validateStrIdentifier
+        -- Parses a single ", typename identifier"
+        parseCommaParam :: ParseState (String, String)
+        parseCommaParam = do
+            eatToken
+            typeName <- scanTypeName
+            id <- scanIdentifier
             return (typeName, id)
 
 -- block = '{' stmt* '}'
 parseBlock :: ParseState SyntaxNode
 parseBlock = do
-    scanToken >>= validatePunctuation "{"
-    statementList <- untilM (peekToken >>= \x -> return (punctuationMatches "}" x)) parseStatementList (EmptyNode)
-    scanToken >>= validatePunctuation "}"
-    return statementList
-    where
-        parseStatementList (otherStatements, isFinished) = do
-            parseStatement >>= \x -> return $ SeqNode otherStatements x
-
-
-
-parseStatementLookahead :: Token -> ParseState SyntaxNode
-parseStatementLookahead tok
-    | isDecl
-    | isBlock
-    | isExpression
-    | isConditional
-    | isLoop
-    | isReturn
-
-parseStatement :: Token -> ParseState SyntaxNode
-parseStatement
-    | isDecl        = do
-         node <- declResult
-         scanToken >>= validatePunctuation ";"
-         return node
-    | isBlock       = blockResult
-    | isExpression  = do
-         node <- expressionResult
-         scanToken >>= validatePunctuation ";"
-         return node
-    | isLoop        = loopResult
-    | isCondition   = conditionResult
-    | isReturn      = do
-         node <- returnResult
-         (_, state) <- validateStr (punctuationMatches ";") (scanToken state)
-         Just (node, state)
-    | otherwise     = 
+    eatPunctuation "{"
+    statementList <- untilM parseStatement (peekToken >>= return . punctuationMatches "}") 
+    eatPunctuation "}"
+    return $ sequenceStatements statementList
   where
-    declResult = parseDeclaration state
-    isDecl = isJust declResult
-    blockResult = parseBlock state
-    isBlock = isJust blockResult
-    expressionResult = parseExpression state
-    isExpression = isJust expressionResult
-    conditionResult = parseCondition state
-    isCondition = isJust conditionResult
-    loopResult = parseLoop state
-    isLoop = isJust loopResult
-    returnResult = parseReturn state
-    isReturn = isJust returnResult
+    -- foldl ensures that sequence nodes are built in forward order
+    sequenceStatements :: [SyntaxNode] -> SyntaxNode
+    sequenceStatements = L.foldl' SeqNode EmptyNode
 
+-- For use to determine statement option, based on the START list for each
+isDecl :: Token -> Bool
+isDecl = isTypeName
+isBlock :: Token -> Bool
+isBlock = punctuationMatches "{"
+isExpression :: Token -> Bool
+isExpression tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "("]
+isConditional :: Token -> Bool
+isConditional = controlMatches "if"
+isLoop :: Token -> Bool
+isLoop = controlMatches "while"
+isReturn :: Token -> Bool
+isReturn = controlMatches "return"
+
+parseStatement :: ParseState SyntaxNode
+parseStatement = peekToken >>= parseStatementLookahead
+  where
+    parseStatementLookahead :: Token -> ParseState SyntaxNode
+    parseStatementLookahead lookahead
+        | isDecl lookahead        = do
+            node <- parseDeclaration
+            eatPunctuation ";"
+            return node
+        | isBlock lookahead       = parseBlock
+        | isExpression lookahead  = do
+            node <- parseDeclaration
+            eatPunctuation ";"
+            return node
+        | isConditional lookahead = parseCondition
+        | isLoop lookahead        = parseLoop
+        | isReturn lookahead      = do
+            node <- parseReturn
+            eatPunctuation ";"
+            return node
+        | otherwise               = raiseFailure
+
+-- TODO
+parseCondition :: ParseState SyntaxNode
+parseCondition = raiseFailure
+{-
 parseCondition :: ParseState SyntaxNode
 parseCondition = do
-    (_, state) <- validateStr (controlMatches "if") (scanToken state)
-    (_, state) <- validateStr (punctuationMatches "(") (scanToken state)
+    (_, state) <- extractStrIfValid (controlMatches "if") (scanToken state)
+    (_, state) <- extractStrIfValid (punctuationMatches "(") (scanToken state)
     (expressionNode, state) <- parseExpression state
-    (_, state) <- validateStr (punctuationMatches ")") (scanToken state)
+    (_, state) <- extractStrIfValid (punctuationMatches ")") (scanToken state)
     (block, originalState) <- parseBlock state
     case scanToken originalState of
         Just (Control str, state)
@@ -238,37 +263,38 @@ parseCondition = do
                                         Just (IfElseNode expressionNode block elseBlock, state)
                                     | otherwise -> Nothing
         _ -> Just (IfNode expressionNode block, originalState)
-
+-}
 parseLoop :: ParseState SyntaxNode
 parseLoop = do
-    scanToken >>= validateControl "while"
-    scanToken >>= validatePunctuation "("
+    eatControl "while"
+    eatPunctuation "("
     expressionNode <- parseExpression
-    scanToken >>= validatePunctuation ")"
+    eatPunctuation ")"
     block <- parseBlock
     return (WhileNode expressionNode block)
     
 
 parseDeclaration :: ParseState SyntaxNode
 parseDeclaration = do
-    typeName <- scanToken >>= validateStrTypeName
-    id <- scanToken >>= validateStrIdentifier
+    typeName <- scanTypeName
+    id <- scanIdentifier
     nextTok <- peekToken
     case nextTok of
         Operator "=" -> do 
-            scanToken
+            eatToken
             expressionNode <- parseExpression
             return (DefinitionNode typeName id expressionNode)
         _ -> return (DeclarationNode typeName id)
 
 parseReturn :: ParseState SyntaxNode
 parseReturn = do
-    scanToken >>= validateControl "return"
-    returnExpr <- parseExpression
-    return (ReturnNode returnExpr)
+    eatControl "return"
+    expressionNode <- parseExpression
+    return $ ReturnNode expressionNode
 
+-- TODO
 parseExpression :: ParseState SyntaxNode
-parseExpression = do
+parseExpression = raiseFailure
     
 assignOpsList :: S.Set String
 assignOpsList = S.fromList ["=", "+=", "-=", "*=", "/=", "%="]
@@ -277,7 +303,7 @@ isAssignmentOperator :: Token -> Bool
 isAssignmentOperator (Operator op) = S.member op assignOpsList
 isAssignmentOperator _             = False
     
-
+{-
 parseAssignment :: ParseState -> Maybe ParseResult
 parseAssignment = do
     identifier <- scanToken
@@ -304,7 +330,7 @@ parseAssignment = do
 parseLogicOr :: ParseState SyntaxNode
 parseLogicOr = do
     node <- parseLogicAnd
-    case validateStr (operatorMatches "||") (scanToken state) of
+    case extractStrIfValid (operatorMatches "||") (scanToken state) of
         Just (_, state) -> do 
             (rightNode, state) <- parseLogicAnd state
             Just (BinaryOpNode Or node rightNode, state)
@@ -352,3 +378,4 @@ parseOrdComp state = do
                     (rightNode, state) <- parseAddition state
                     Just (BinaryOpNode LessThanOrEqual node rightNode, state)
                 | otherwise                    -> Just (node, originalState)
+-}
