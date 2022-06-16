@@ -82,50 +82,6 @@ scanToken :: ParseState -> Maybe (Token, ParseState)
 scanToken []    = Nothing
 scanToken state = return (head state, tail state)
 
-isIdentifier :: Token -> Bool
-isIdentifier (Identifier _) = True
-isIdentifier _              = False
-
-isTypeName :: Token -> Bool
-isTypeName (TypeName _) = True
-isTypeName _            = False
-
-isConstant :: Token -> Bool
-isConstant (Constant _) = True
-isConstant _            = False
-
-isOperator :: Token -> Bool
-isOperator (Operator _) = True
-isOperator _            = False
-
-isControl :: Token -> Bool
-isControl (Control _) = True
-isControl _           = False
-
-isPunctuation :: Token -> Bool
-isPunctuation (Punctuation _) = True
-isPunctuation _               = False
-
-isEof :: Token -> Bool
-isEof Eof = True
-isEof _   = False
-
-isInvalid :: Token -> Bool
-isInvalid Invalid = True
-isInvalid _       = False
-
-punctuationMatches :: String -> Token -> Bool
-punctuationMatches v (Punctuation p) = p == v
-punctuationMatches _ _               = False
-
-controlMatches :: String -> Token -> Bool
-controlMatches v (Control c) = c == v
-controlMatches _ _           = False
-
-operatorMatches :: String -> Token -> Bool
-operatorMatches v (Operator o) = o == v
-operatorMatches _ _             = False
-
 validateStr :: (Token -> Bool) -> Maybe (Token, ParseState) -> Maybe (String, ParseState)
 validateStr _ Nothing = Nothing
 validateStr check (Just (tok, state))

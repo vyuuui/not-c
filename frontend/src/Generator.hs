@@ -1,5 +1,5 @@
 module Generator
-(
+( validateProgram
 
 ) where
 

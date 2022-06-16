@@ -4,6 +4,17 @@ module Lexer
 , ConstantType(..)
 , Token(..)
 , LexerResult
+, isIdentifier
+, isTypeName
+, isConstant
+, isOperator
+, isControl
+, isPunctuation
+, isEof
+, isInvalid
+, punctuationMatches
+, controlMatches
+, operatorMatches
 ) where
 
 import qualified Data.Set as S
@@ -16,7 +27,7 @@ data ConstantType
   | FloatConstant Float
   | BoolConstant Bool
   | StringConstant String
-  deriving Show
+  deriving (Show, Eq)
 
 data Token
   = Identifier String
@@ -27,9 +38,53 @@ data Token
   | Punctuation String
   | Eof
   | Invalid
-  deriving Show
+  deriving (Show, Eq)
 
 type LexerResult = (Token, String)
+
+isIdentifier :: Token -> Bool
+isIdentifier (Identifier _) = True
+isIdentifier _              = False
+
+isTypeName :: Token -> Bool
+isTypeName (TypeName _) = True
+isTypeName _            = False
+
+isConstant :: Token -> Bool
+isConstant (Constant _) = True
+isConstant _            = False
+
+isOperator :: Token -> Bool
+isOperator (Operator _) = True
+isOperator _            = False
+
+isControl :: Token -> Bool
+isControl (Control _) = True
+isControl _           = False
+
+isPunctuation :: Token -> Bool
+isPunctuation (Punctuation _) = True
+isPunctuation _               = False
+
+isEof :: Token -> Bool
+isEof Eof = True
+isEof _   = False
+
+isInvalid :: Token -> Bool
+isInvalid Invalid = True
+isInvalid _       = False
+
+punctuationMatches :: String -> Token -> Bool
+punctuationMatches v (Punctuation p) = p == v
+punctuationMatches _ _               = False
+
+controlMatches :: String -> Token -> Bool
+controlMatches v (Control c) = c == v
+controlMatches _ _           = False
+
+operatorMatches :: String -> Token -> Bool
+operatorMatches v (Operator o) = o == v
+operatorMatches _ _             = False
 
 operators :: S.Set String
 operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!"]
@@ -37,14 +92,14 @@ operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=
 allOperatorChars :: S.Set Char
 allOperatorChars = S.foldr (S.union . S.fromList) S.empty operators
 
-isOperator :: Char -> Bool
-isOperator h = S.member h allOperatorChars
+isOperatorChar :: Char -> Bool
+isOperatorChar h = S.member h allOperatorChars
 
-isLetter :: Char -> Bool
-isLetter h = C.isAlpha h || h == '_'
+isLetterChar :: Char -> Bool
+isLetterChar h = C.isAlpha h || h == '_'
 
-isIdentifier :: Char -> Bool
-isIdentifier h = C.isAlphaNum h || h == '_'
+isIdentifierChar :: Char -> Bool
+isIdentifierChar h = C.isAlphaNum h || h == '_'
 
 isNumber :: Char -> Bool
 isNumber h = C.isDigit h || h == '.'
@@ -55,8 +110,8 @@ control = S.fromList ["if", "else", "for", "while", "return"]
 punctuation :: S.Set String
 punctuation = S.fromList ["(", ")", "{", "}", ",", ";"]
 
-isPunctuation :: Char -> Bool
-isPunctuation h = S.member [h] punctuation
+isPunctuationChar :: Char -> Bool
+isPunctuationChar h = S.member [h] punctuation
 
 types :: S.Set String
 types = S.fromList ["void", "char", "short", "int", "long", "float", "double", "bool", "string"]
@@ -64,16 +119,16 @@ types = S.fromList ["void", "char", "short", "int", "long", "float", "double", "
 
 lexStringSingle :: String -> LexerResult
 lexStringSingle (h:t)
-    | isOperator h      = let (token, rest) = spanOperator (h:t)
-                          in (Operator token, rest)
-    | isPunctuation h   = (Punctuation [h], t)
-    | C.isDigit h       = let (token, rest) = span Lexer.isNumber t
-                          in (classifyNumberToken (h:token), rest)
-    | Lexer.isLetter h  = let (token, rest) = span isIdentifier t
-                          in (classifyLetterToken (h:token), rest)
-    | C.isSpace h       = lexStringSingle $ eatWs t
-    | h == '"'          = lexStringConstant t
-    | otherwise         = (Invalid, t)
+    | isOperatorChar h    = let (token, rest) = spanOperator (h:t)
+                            in (Operator token, rest)
+    | isPunctuationChar h = (Punctuation [h], t)
+    | C.isDigit h         = let (token, rest) = span Lexer.isNumber t
+                            in (classifyNumberToken (h:token), rest)
+    | isLetterChar h      = let (token, rest) = span isIdentifierChar t
+                              in (classifyLetterToken (h:token), rest)
+    | C.isSpace h         = lexStringSingle $ eatWs t
+    | h == '"'            = lexStringConstant t
+    | otherwise           = (Invalid, t)
   where
     lexStringConstant :: String -> LexerResult
     lexStringConstant str

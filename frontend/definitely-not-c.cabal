@@ -19,7 +19,8 @@ maintainer:         tyrannicanine@gmail.com
 extra-source-files: CHANGELOG.md
 
 executable definitely-not-c
-    main-is:          CompilerMain.hs
+    main-is: ParserStateful.hs
+    -- main-is:          CompilerMain.hs
     ghc-options:      -dynamic
 
     -- Modules included in this executable, other than Main.
@@ -29,6 +30,8 @@ executable definitely-not-c
     -- other-extensions:
     build-depends:    base ^>=4.15.1.0,
                       monad-loops ^>=0.4.3,
-                      containers ^>=0.6.4.1
+                      containers ^>=0.6.4.1,
+                      mtl ^>=2.2.2,
+                      transformers ^>=0.5.6.2
     hs-source-dirs:   src
     default-language: Haskell2010
