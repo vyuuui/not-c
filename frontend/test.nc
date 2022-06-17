@@ -18,5 +18,7 @@ int mult(float z) {
 void main() {
     if (check(0.5, 2.1)) {
         check((4), 5.0);
+    } else {
+        mult(9);
     }
 }

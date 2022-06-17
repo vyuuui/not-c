@@ -436,7 +436,7 @@ eqcomp = ordcomp ('==' ordcomp)* | ordcomp ('!=' orcomp)*
 ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' addition)* | addition ('>=' addition)*
 addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
 multiplication = uneg ('*' uneg)* | uneg ('/' uneg)* | uneg ('%' uneg)*
-uneg = '-' baseexpr | baseexpr
+uneg = '-' baseexpr | '!' baseexpr | baseexpr
 baseexpr = identifier '(' arglist ')' | identifier | constant | '(' expression ')'
 arglist = expression (',' expression)* | ε
 

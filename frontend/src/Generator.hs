@@ -7,7 +7,7 @@ import qualified Data.Set as S
 import qualified Data.Map as M
 import qualified Data.List as L
 import Data.Maybe
-import Parser
+import ParserStateful
 import Lexer
 
 data VarInfo = FunctionVar String [(String, String)] | PrimitiveVar String
@@ -132,7 +132,7 @@ validateSyntaxNode statement env = case statement of
     IfElseNode condition block elseBlock -> (env, snd (validateSyntaxNode condition env)
                                                   && isImplicitCastAllowed (decltype condition env) "bool"
                                                   && snd (validateSyntaxNode block $ EnvLink M.empty env)
-                                                  && snd (validateSyntaxNode block $ EnvLink M.empty env))
+                                                  && snd (validateSyntaxNode elseBlock $ EnvLink M.empty env))
     ReturnNode expr -> let Just (FunctionVar currentFunctionRetType _) = lookupVar "$currentFunction" env in
         (env, snd (validateSyntaxNode expr env)
               && isImplicitCastAllowed (decltype expr env) currentFunctionRetType)
