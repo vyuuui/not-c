@@ -38,6 +38,27 @@ add t0 r0 r1
 add r3 r2 r0
 
 */
+// mov (dest) r3(10)
+class ProgramStack {
+public:
+    template <typename T>
+    T get_stack_var(size_t byte_off) {
+        return *reinterpret_cast<T*>(frame_data.data() + byte_off);
+    }
+    template <typename T>
+    void set_stack_var(size_t byte_off, T const& val) {
+        *reinterpret_cast<T*>(frame_data.data() + byte_off) = val;
+    }
+    size_t get_stack_size() {
+        return frame_data.size();
+    }
+    void change_size(ssize_t change) {
+        frame_data.resize(frame_data.size() + change);
+    }
+
+private:
+    std::vector<uint8_t> frame_data;
+};
 
 struct CpuContext {
     uint64_t program_counter;
@@ -48,9 +69,7 @@ struct CpuContext {
     bool compare_overflow; // = true if r0 - r1 overflows
     bool compare_sign; // = true if r0 - r1 is < 0 (Signed)
 
-    int64_t regstate[32];
-    double regstate_float[32];
-    std::stack<std::unordered_map<std::string, int64_t>> stacks;
+    ProgramStack stack;
     uint8_t cmp_flags;
 } ctx;
 
@@ -79,6 +98,8 @@ int64_t get_type_mask(OperandType type) {
     return 0;
 }
 
+string a = "aaaaaa";
+// 
 
 class Operand {
 public:
@@ -105,58 +126,20 @@ private:
     OperandType type;
 };
 
-class MemoryOperand : public Operand {
+class VarOperand : public Operand {
 public:
-    MemoryOperand(OperandType type, std::string const& var_name) : Operand(type), var_name(var_name) {}
+    VarOperand(OperandType type, size_t offset) : Operand(type), offset(offset) {}
     
     void set_generic(int64_t value) override {
-        ctx.stacks.top()[var_name] = value;
+        ctx.stack.set_stack_var(offset, value);
     }
     
     int64_t get_generic() const override {
-        return ctx.stacks.top()[var_name];
+        return ctx.stack.get_stack_var<int64_t>(offset);
     }
 
 private:
-    std::string var_name;
-};
-
-class IntRegisterOperand : public Operand {
-public:
-    IntRegisterOperand(OperandType type, uint8_t register_num) : Operand(type), register_num(register_num) {
-        if (register_num >= 32) {
-            throw "Invalid integer register number";
-        }
-    }
-
-    void set_generic(int64_t t) override {
-        ctx.regstate[register_num] = t;
-    }
-
-    int64_t get_generic() const override {
-        return ctx.regstate[register_num];
-    }
-private:
-    uint8_t register_num;
-};
-
-class FloatRegisterOperand : public Operand {
-public:
-    FloatRegisterOperand(uint8_t register_num) : Operand(OperandType::Float), register_num(register_num) {
-        if (register_num >= 32) {
-            throw "Invalid float register number";
-        }
-    }
-
-    void set_generic(int64_t t) override {
-        ctx.regstate_float[register_num] = *reinterpret_cast<double*>(&t);
-    }
-
-    int64_t get_generic() const override {
-        return *reinterpret_cast<int64_t*>(&ctx.regstate_float[register_num]);
-    }
-private:
-    uint8_t register_num;
+    size_t offset;
 };
 
 class ImmediateOperand : public Operand {
@@ -520,7 +503,7 @@ Instruction* parseLine(std::istringstream stream) {
                     } else {
                         throw "Invalid memory operand prefix";
                     }
-                    ops.push_back(new MemoryOperand(type, part));
+                    ops.push_back(new StackMemoryOperand(type, part));
                     break;
                 }
                 default: {

@@ -1,14 +1,23 @@
-bool not(int x) {
-    return x + 5 < 2;
+bool test(int* out) {
+    *out = 5/4+2;
+    return *out == 3;
 }
 
 short main() {
     int x = 0;
     x += 1;
-    float y = 0;
-    y += x;
-    while (x > 0) {
-        
+    int*[10] a;
+    char[4] str;
+    str = "test";
+    
+    int* y = &x;
+    int** z = &y;
+    a[0] = y;
+
+    while (y == *z) {
+        test(*(z+x)) == false;
     }
+    z[x];
+    1 + 2;
     return x;
 }

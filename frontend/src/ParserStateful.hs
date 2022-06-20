@@ -13,8 +13,13 @@ import Lexer
 import System.IO
 import Debug.Trace
 
+type DataType = (String, [Int])
+type Program = [SyntaxNode]
+type ParseState = StateT ([Token], [SyntaxNode]) Maybe
+type ParameterList = [(DataType, String)]
+
 data SyntaxNode
-    = FunctionDefinitionNode String String [(String, String)] SyntaxNode
+    = FunctionDefinitionNode DataType String [(DataType, String)] SyntaxNode
     | EmptyNode
     -- Two sequential operations
     | SeqNode SyntaxNode SyntaxNode
@@ -24,16 +29,17 @@ data SyntaxNode
     | IfElseNode SyntaxNode SyntaxNode SyntaxNode
     | ReturnNode SyntaxNode
     -- Decl
-    | DeclarationNode String String
-    | DefinitionNode String String SyntaxNode
+    | DeclarationNode DataType String
+    | DefinitionNode DataType String SyntaxNode
     -- Expression
     | IdentifierNode String
     | LiteralNode ConstantType
     | FunctionCallNode String [SyntaxNode]
+    | ArrayIndexNode SyntaxNode SyntaxNode
     | ParenthesisNode SyntaxNode
     | BinaryOpNode BinaryOp SyntaxNode SyntaxNode
     | UnaryOpNode UnaryOp SyntaxNode
-    | AssignmentNode String AssignmentOp SyntaxNode
+    | AssignmentNode SyntaxNode AssignmentOp SyntaxNode
     deriving Show
 
 data BinaryOp
@@ -64,11 +70,11 @@ data AssignmentOp
 data UnaryOp
     = Negate
     | Not
+    | Reference
+    | Dereference
     deriving (Show, Eq)
 
-type Program = [SyntaxNode]
 
-type ParseState = StateT ([Token], [SyntaxNode]) Maybe
 
 loadAndParse :: String -> IO Program
 loadAndParse file = do
@@ -190,7 +196,7 @@ parseProg initialList =
 -- Return a parsed function as a SyntaxNode
 parseFunction :: ParseState SyntaxNode
 parseFunction = do
-    typeName <- scanTypeName
+    typeName <- parseType
     id <- scanIdentifier
     eatPunctuation "("
     paramList <- parseParamList
@@ -198,7 +204,6 @@ parseFunction = do
     blockNode <- parseBlock
     return $ FunctionDefinitionNode typeName id paramList blockNode
 
-type ParameterList = [(String, String)]
 
 parseParamList :: ParseState ParameterList
 parseParamList = do
@@ -210,15 +215,15 @@ parseParamList = do
     -- Parses the full param list, given there is at least one parameter
     doActualParseParamList :: ParseState ParameterList
     doActualParseParamList = do
-        typeName <- scanTypeName
+        typeName <- parseType
         id <- scanIdentifier
         ((typeName, id):) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaParam
       where
         -- Parses a single ", typename identifier"
-        parseCommaParam :: ParseState (String, String)
+        parseCommaParam :: ParseState (DataType, String)
         parseCommaParam = do
             eatToken
-            typeName <- scanTypeName
+            typeName <- parseType
             id <- scanIdentifier
             return (typeName, id)
 
@@ -240,7 +245,11 @@ isDecl = isTypeName
 isBlock :: Token -> Bool
 isBlock = punctuationMatches "{"
 isExpression :: Token -> Bool
-isExpression tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "("]
+isExpression tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(",
+                                operatorMatches "!", operatorMatches "&", operatorMatches "*",
+                                operatorMatches "-"]
+isLvalue :: Token -> Bool
+isLvalue tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(", punctuationMatches "*" ]
 isConditional :: Token -> Bool
 isConditional = controlMatches "if"
 isLoop :: Token -> Bool
@@ -298,11 +307,10 @@ parseLoop = do
     eatPunctuation ")"
     block <- parseBlock
     return (WhileNode expressionNode block)
-    
 
 parseDeclaration :: ParseState SyntaxNode
 parseDeclaration = do
-    typeName <- scanTypeName
+    typeName <- parseType
     id <- scanIdentifier
     nextTok <- peekToken
     case nextTok of
@@ -328,15 +336,19 @@ isAssignmentOperator :: Token -> Bool
 isAssignmentOperator (Operator op) = S.member op assignOpsList
 isAssignmentOperator _             = False
 
+scanAssignmentOperator :: ParseState ()
+scanAssignmentOperator = scanToken >>= \x -> unless (isAssignmentOperator x) raiseFailure
+
 parseAssignment :: ParseState SyntaxNode
 parseAssignment = do
-    (maybeId, maybeAssign) <- peekTwoToken
-    if isIdentifier maybeId && isAssignmentOperator maybeAssign
+    startState <- get
+    let dryRun = runStateT (parseLvalue >> scanAssignmentOperator) startState
+    if isJust dryRun
       then do
-        id <- scanIdentifier
+        lhs <- parseLvalue
         assignOp <- scanToken
         subExpr <- parseAssignment
-        return $ AssignmentNode id (getAssignOp assignOp) subExpr
+        return $ AssignmentNode lhs (getAssignOp assignOp) subExpr
       else parseLogicOr
   where
     getAssignOp (Operator o)
@@ -348,119 +360,200 @@ parseAssignment = do
         | o == "%=" = ModEq
         | otherwise = error "getAssignOp should never receive an invalid assign operator"
     getAssignOp _ = error "getAssignOp should never receive an invalid assign operator"
-    
-    
-parseLogicOr :: ParseState SyntaxNode
-parseLogicOr = do
-    node <- parseLogicAnd
+
+parseLvalue :: ParseState SyntaxNode
+parseLvalue = do
     token <- peekToken
-    if operatorMatches "||" token
+    if operatorMatches "*" token
     then do
         eatToken
-        rightNode <- parseLogicAnd
-        return (BinaryOpNode Or node rightNode)
+        indirectionNode <- parseLvalue
+        return (UnaryOpNode Dereference indirectionNode)
     else
-        return node
+        parseIndirection
+
+type BinaryNodeCombinator = SyntaxNode -> SyntaxNode -> SyntaxNode
+
+parseOpPrecedence
+    :: ParseState SyntaxNode -- Subexpr parser action
+    -> [(String, BinaryNodeCombinator)] -- (Operator, combinator) pairs
+    -> ParseState SyntaxNode -- Root node
+parseOpPrecedence parseAction opCombine = do
+    init <- parseAction
+    equalPrecedenceList <- whileM shouldContinue execMatched
+    return $ L.foldl' (\a (node, combine) -> combine a node) init equalPrecedenceList
+  where
+    checks = map (\(op, combine) -> (operatorMatches op, combine)) opCombine
+    shouldContinue :: ParseState Bool
+    shouldContinue = do
+        nextTok <- peekToken
+        return $ any (($ nextTok) . fst) checks
+    execMatched :: ParseState (SyntaxNode, BinaryNodeCombinator)
+    execMatched = do
+        nextTok <- scanToken
+        let combineFn = snd $ head $ filter (($ nextTok) . fst) checks
+        nextExpr <- parseAction
+        return (nextExpr, combineFn) 
+
+parseLogicOr :: ParseState SyntaxNode
+parseLogicOr = parseOpPrecedence parseLogicAnd [("||", BinaryOpNode Or)]
+    -- do
+    -- node <- parseLogicAnd
+    -- token <- peekToken
+    -- if operatorMatches "||" token
+    -- then do
+    --     eatToken
+    --     rightNode <- parseLogicAnd
+    --     return (BinaryOpNode Or node rightNode)
+    -- else
+    --     return node
 
 parseLogicAnd :: ParseState SyntaxNode
-parseLogicAnd = do
-    node <- parseEqComp
-    token <- peekToken
-    if operatorMatches "&&" token
-    then do
-        eatToken
-        rightNode <- parseEqComp
-        return (BinaryOpNode And node rightNode)
-    else
-        return node
+parseLogicAnd = parseOpPrecedence parseEqComp [("&&", BinaryOpNode And)]
+    -- do
+    -- node <- parseEqComp
+    -- token <- peekToken
+    -- if operatorMatches "&&" token
+    -- then do
+    --     eatToken
+    --     rightNode <- parseEqComp
+    --     return (BinaryOpNode And node rightNode)
+    -- else
+    --     return node
 
 parseEqComp :: ParseState SyntaxNode
-parseEqComp = do
-    node <- parseOrdComp
-    token <- peekToken
-    case () of _
-                | operatorMatches "==" token -> do 
-                    eatToken
-                    rightNode <- parseOrdComp
-                    return (BinaryOpNode Equal node rightNode)
-                | operatorMatches "!=" token -> do 
-                    eatToken
-                    rightNode <- parseOrdComp
-                    return (BinaryOpNode NotEqual node rightNode)
-                | otherwise                    -> return node
+parseEqComp = parseOpPrecedence parseOrdComp [("==", BinaryOpNode Equal),
+                                              ("!=", BinaryOpNode NotEqual)]
+    -- do
+    -- node <- parseOrdComp
+    -- token <- peekToken
+    -- case () of _
+    --             | operatorMatches "==" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseOrdComp
+    --                 return (BinaryOpNode Equal node rightNode)
+    --             | operatorMatches "!=" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseOrdComp
+    --                 return (BinaryOpNode NotEqual node rightNode)
+    --             | otherwise                    -> return node
 
 parseOrdComp :: ParseState SyntaxNode
-parseOrdComp = do
-    node <- parseAddition
-    token <- peekToken
-    case () of _
-                | operatorMatches ">" token -> do 
-                    eatToken
-                    rightNode <- parseAddition
-                    return (BinaryOpNode GreaterThan node rightNode)
-                | operatorMatches "<" token -> do 
-                    eatToken
-                    rightNode <- parseAddition
-                    return (BinaryOpNode LessThan node rightNode)
-                | operatorMatches ">=" token -> do 
-                    eatToken
-                    rightNode <- parseAddition
-                    return (BinaryOpNode GreaterThanOrEqual node rightNode)
-                | operatorMatches "<=" token -> do 
-                    eatToken
-                    rightNode <- parseAddition
-                    return (BinaryOpNode LessThanOrEqual node rightNode)
-                | otherwise                    -> return node
+parseOrdComp = parseOpPrecedence parseAddition [(">", BinaryOpNode GreaterThan),
+                                                ("<", BinaryOpNode LessThan),
+                                                (">=", BinaryOpNode GreaterThanOrEqual),
+                                                ("<=", BinaryOpNode LessThanOrEqual)]
+    -- do
+    -- node <- parseAddition
+    -- token <- peekToken
+    -- case () of _
+    --             | operatorMatches ">" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseAddition
+    --                 return (BinaryOpNode GreaterThan node rightNode)
+    --             | operatorMatches "<" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseAddition
+    --                 return (BinaryOpNode LessThan node rightNode)
+    --             | operatorMatches ">=" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseAddition
+    --                 return (BinaryOpNode GreaterThanOrEqual node rightNode)
+    --             | operatorMatches "<=" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseAddition
+    --                 return (BinaryOpNode LessThanOrEqual node rightNode)
+    --             | otherwise                    -> return node
 
 parseAddition :: ParseState SyntaxNode
-parseAddition = do
-    node <- parseMultiplication
-    token <- peekToken
-    case () of _
-                | operatorMatches "+" token -> do 
-                    eatToken
-                    rightNode <- parseMultiplication
-                    return (BinaryOpNode Addition node rightNode)
-                | operatorMatches "-" token -> do 
-                    eatToken
-                    rightNode <- parseMultiplication
-                    return (BinaryOpNode Subtraction node rightNode)
-                | otherwise                    -> return node
+parseAddition = parseOpPrecedence parseMultiplication [("+", BinaryOpNode Addition),
+                                                       ("-", BinaryOpNode Subtraction)]
+    
+    -- do
+    -- node <- parseMultiplication
+    -- token <- peekToken
+    -- case () of _
+    --             | operatorMatches "+" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseMultiplication
+    --                 return (BinaryOpNode Addition node rightNode)
+    --             | operatorMatches "-" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseMultiplication
+    --                 return (BinaryOpNode Subtraction node rightNode)
+    --             | otherwise                    -> return node
 
 parseMultiplication :: ParseState SyntaxNode
-parseMultiplication = do
-    node <- parseUnary
-    token <- peekToken
-    case () of _
-                | operatorMatches "*" token -> do 
-                    eatToken
-                    rightNode <- parseUnary
-                    return (BinaryOpNode Multiplication node rightNode)
-                | operatorMatches "/" token -> do 
-                    eatToken
-                    rightNode <- parseUnary
-                    return (BinaryOpNode Division node rightNode)
-                | operatorMatches "%" token -> do 
-                    eatToken
-                    rightNode <- parseUnary
-                    return (BinaryOpNode Mod node rightNode)
-                | otherwise                    -> return node
-
+parseMultiplication = parseOpPrecedence parseUnary [("*", BinaryOpNode Multiplication),
+                                                    ("/", BinaryOpNode Division),
+                                                    ("%", BinaryOpNode Mod)]
+    -- do
+    -- node <- parseUnary
+    -- token <- peekToken
+    -- case () of _
+    --             | operatorMatches "*" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseUnary
+    --                 return (BinaryOpNode Multiplication node rightNode)
+    --             | operatorMatches "/" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseUnary
+    --                 return (BinaryOpNode Division node rightNode)
+    --             | operatorMatches "%" token -> do 
+    --                 eatToken
+    --                 rightNode <- parseUnary
+    --                 return (BinaryOpNode Mod node rightNode)
+    --             | otherwise                    -> return node
 
 parseUnary :: ParseState SyntaxNode
 parseUnary = do
     maybeOp <- peekToken
     case () of _ 
                 | operatorMatches "-" maybeOp -> do
-                    scanToken
-                    baseExpr <- parseBaseExpr
-                    return $ UnaryOpNode Negate baseExpr
+                  eatToken
+                  subUnary <- parseUnary
+                  return $ UnaryOpNode Negate subUnary
                 | operatorMatches "!" maybeOp -> do
-                    scanToken
-                    baseExpr <- parseBaseExpr
-                    return $ UnaryOpNode Not baseExpr
-                | otherwise -> parseBaseExpr
+                  eatToken
+                  subUnary <- parseUnary
+                  return $ UnaryOpNode Not subUnary
+                | operatorMatches "&" maybeOp -> do
+                  eatToken
+                  subUnary <- parseUnary
+                  return $ UnaryOpNode Reference subUnary
+                | operatorMatches "*" maybeOp -> do
+                  eatToken
+                  subUnary <- parseUnary
+                  return $ UnaryOpNode Dereference subUnary
+                | otherwise -> parseIndirection
 
+parseIndirection :: ParseState SyntaxNode
+parseIndirection = do
+    (lookahead, lookahead2) <- peekTwoToken
+    if isIdentifier lookahead && punctuationMatches "(" lookahead2
+      then parseCall >>= tryParseArray
+      else parseBaseExpr >>= tryParseArray
+  where
+    parseCall = do
+        id <- scanIdentifier
+        eatPunctuation "("
+        argList <- parseArgList
+        eatPunctuation ")"
+        return $ FunctionCallNode id argList
+    tryParseArray node = do
+        arrayIdxs <- whileM (punctuationMatches "[" <$> peekToken) parseArrayIndex 
+        return $ foldl buildArrayIdxs node arrayIdxs
+      where
+        -- Parses a single ", typename identifier"
+        parseArrayIndex :: ParseState SyntaxNode
+        parseArrayIndex = do
+            eatPunctuation "["
+            arrayIdx <- parseExpression
+            eatPunctuation "]"
+            return arrayIdx
+        buildArrayIdxs :: SyntaxNode -> SyntaxNode -> SyntaxNode
+        buildArrayIdxs = ArrayIndexNode
+    
 parseBaseExpr :: ParseState SyntaxNode
 parseBaseExpr = do
     lookahead <- peekToken
@@ -472,15 +565,7 @@ parseBaseExpr = do
   where
     parseId = do
         id <- scanIdentifier
-        maybeParen <- peekToken
-        if punctuationMatches "(" maybeParen
-            then parseCall id
-            else return $ IdentifierNode id
-    parseCall id = do
-        eatPunctuation "("
-        argList <- parseArgList
-        eatPunctuation ")"
-        return $ FunctionCallNode id argList
+        return $ IdentifierNode id
     parseConstant = do 
         const <- scanConstant
         return $ LiteralNode const
@@ -507,3 +592,58 @@ parseArgList = do
         parseCommaArg = do
             eatToken
             parseExpression
+
+parseType :: ParseState DataType
+parseType = do
+    basicType <- scanTypeName
+    ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken >> return 0)
+    arrLevels <- whileM (punctuationMatches "[" <$> peekToken) parseArrayDecl
+    return (basicType, reverse $ ptrLevels ++ arrLevels)
+  where
+    parseArrayDecl :: ParseState Int
+    parseArrayDecl = do
+        eatPunctuation "["
+        constant <- scanConstant
+        case constant of
+            IntConstant v -> do
+                eatPunctuation "]"
+                return (fromIntegral v)
+            _             -> raiseFailure
+
+{-
+prog = function+
+function = type identifier '(' paramlist ')' block
+paramlist = type identifier (',' type identifier)* | ε
+block = '{' stmt* '}'
+stmt = declaration ';' | block | expression ';' | conditional | loop | ret ';'
+declaration = type identifier optassign
+optassign = '=' expression | ε
+loop = 'while' '(' expression ')' block
+conditional = 'if' '(' expression ')' block elseconditional
+elseconditional = 'else' block | ε
+ret = 'return' expression
+expression = assignment
+assignment = lvalue '=' assignment  | lvalue '+=' assignment |
+             lvalue '-=' assignment | lvalue '*=' assignment |
+             lvalue '/=' assignment | lvalue '%=' assignment | logicor
+lvalue = '*' lvalue | indirection
+logicor = logicand ('||' logicand)*
+logicand = eqcomp ('&&' eqcomp)*
+eqcomp = ordcomp ('==' ordcomp)* | ordcomp ('!=' orcomp)*
+ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' addition)* | addition ('>=' addition)*
+addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
+multiplication = unary ('*' unary)* | unary ('/' unary)* | unary ('%' unary)*
+unary = '-' unary | '!' unary | '&' unary | '*' unary | indirection
+indirection = identifier '(' arglist ')' ('[' expression ']')* | baseexpr ('[' expression ']')*
+baseexpr = identifier | constant | '(' expression ')'
+arglist = expression (',' expression)* | ε
+
+
+
+type = basictype qualifier
+qualifier = '*'* '[' constant ']'*
+basictype = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
+constant = 'true' | 'false' | number
+number = -?[0-9]+\.[0-9]*
+identifier = [A-Za-z][A-Za-z0-9_]*
+-}

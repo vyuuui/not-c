@@ -1,29 +1,31 @@
-module Lexer
-( lexString
-, lexStringSingle
-, ConstantType(..)
-, Token(..)
-, LexerResult
-, isIdentifier
-, isTypeName
-, isConstant
-, isOperator
-, isControl
-, isPunctuation
-, isEof
-, isInvalid
-, punctuationMatches
-, controlMatches
-, operatorMatches
-) where
+-- module Lexer
+-- ( lexString
+-- , lexStringSingle
+-- , ConstantType(..)
+-- , Token(..)
+-- , LexerResult
+-- , isIdentifier
+-- , isTypeName
+-- , isConstant
+-- , isOperator
+-- , isControl
+-- , isPunctuation
+-- , isEof
+-- , isInvalid
+-- , punctuationMatches
+-- , controlMatches
+-- , operatorMatches
+-- ) where
+module Lexer where
 
 import qualified Data.Set as S
 import qualified Data.List as L
 import qualified Data.Char as C
 import System.IO
+import Debug.Trace
 
 data ConstantType
-  = IntConstant Integer
+  = IntConstant Int
   | FloatConstant Float
   | BoolConstant Bool
   | StringConstant String
@@ -87,7 +89,7 @@ operatorMatches v (Operator o) = o == v
 operatorMatches _ _             = False
 
 operators :: S.Set String
-operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!"]
+operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!", "&"]
 
 allOperatorChars :: S.Set Char
 allOperatorChars = S.foldr (S.union . S.fromList) S.empty operators
@@ -108,24 +110,23 @@ control :: S.Set String
 control = S.fromList ["if", "else", "for", "while", "return"]
 
 punctuation :: S.Set String
-punctuation = S.fromList ["(", ")", "{", "}", ",", ";"]
+punctuation = S.fromList ["(", ")", "{", "}", ",", ";", "[", "]"]
 
 isPunctuationChar :: Char -> Bool
 isPunctuationChar h = S.member [h] punctuation
 
 types :: S.Set String
-types = S.fromList ["void", "char", "short", "int", "long", "float", "double", "bool", "string"]
+types = S.fromList ["void", "char", "short", "int", "long", "float", "bool"]
 
 
 lexStringSingle :: String -> LexerResult
 lexStringSingle (h:t)
-    | isOperatorChar h    = let (token, rest) = spanOperator (h:t)
-                            in (Operator token, rest)
+    | isOperatorChar h    = lexOperator (h:t)
     | isPunctuationChar h = (Punctuation [h], t)
     | C.isDigit h         = let (token, rest) = span Lexer.isNumber t
                             in (classifyNumberToken (h:token), rest)
     | isLetterChar h      = let (token, rest) = span isIdentifierChar t
-                              in (classifyLetterToken (h:token), rest)
+                            in (classifyLetterToken (h:token), rest)
     | C.isSpace h         = lexStringSingle $ eatWs t
     | h == '"'            = lexStringConstant t
     | otherwise           = (Invalid, t)
@@ -149,7 +150,7 @@ lexStringSingle (h:t)
     eatWs str = dropWhile C.isSpace str
     classifyNumberToken str
         | '.' `elem` str = Constant $ FloatConstant (read str :: Float)
-        | otherwise      = Constant $ IntConstant (read str :: Integer)
+        | otherwise      = Constant $ IntConstant (read str :: Int)
     classifyLetterToken str
         | str == "true"            = Constant $ BoolConstant True
         | str == "false"           = Constant $ BoolConstant False
@@ -157,15 +158,19 @@ lexStringSingle (h:t)
         | S.member str punctuation = Punctuation str
         | S.member str types       = TypeName str
         | otherwise                = Identifier str
-    spanOperator :: String -> (String, String)
-    spanOperator str = (extracted, last next:rest)
+    lexOperator :: String -> LexerResult
+    lexOperator str
+        | null longestMatch = (Invalid, rest)
+        | otherwise         = (Operator longestMatch, drop (length longestMatch) str)
       where
-        checkStop (cur, next, [])    = True
-        checkStop (cur, next, rest)  = not $ S.member next operators
-        (extracted, next, rest)      = until checkStop
-                                       (\(cur, next, rest) -> (next, next ++ [head rest], tail rest))
-                                       ("", [head str], tail str)
-lexStringSingle [] = (Eof, "")
+        checkStop (_, _, [])            = True
+        checkStop (cur, _, rest)        = not (any (L.isPrefixOf cur) (S.toList operators))
+        stepLex (cur, longest, rest) 
+            | S.member newCur operators = (newCur, newCur, tail rest)
+            | otherwise                 = (newCur, longest, tail rest)
+          where
+            newCur = cur ++ [head rest]
+        (end, longestMatch, rest) = until checkStop stepLex ("", "", str)
 
 lexString :: String -> [Token]
 lexString str = fst (until (\(_, rest) -> rest == "")

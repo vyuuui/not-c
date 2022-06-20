@@ -9,8 +9,9 @@ import qualified Data.List as L
 import Data.Maybe
 import ParserStateful
 import Lexer
+import Debug.Trace
 
-data VarInfo = FunctionVar String [(String, String)] | PrimitiveVar String
+data VarInfo = FunctionVar DataType [(DataType, String)] | PrimitiveVar DataType
 data Environment = EnvLink (M.Map String VarInfo) Environment | EnvBase (M.Map String VarInfo)
 
 -- Check variable existence upon reference
@@ -35,77 +36,117 @@ validateProgram program = let baseEnv = EnvBase (foldl addFunctionToEnvironment 
         checkFunction env node = let FunctionDefinitionNode typeName name argList body = node in
             snd (validateSyntaxNode body (addFunctionParameters (insertIntoEnv env "$currentFunction" (FunctionVar typeName [])) argList))
           where
-            addFunctionParameters :: Environment -> [(String, String)] -> Environment
+            addFunctionParameters :: Environment -> [(DataType, String)] -> Environment
             addFunctionParameters = foldl (\a (typeName, name) -> insertIntoEnv a name (PrimitiveVar typeName))
 
-isIntegralType :: String -> Bool
-isIntegralType typename
-    | typename == "char"  = True
-    | typename == "short" = True
-    | typename == "int"   = True
-    | typename == "long"  = True
+isIntegralType :: DataType -> Bool
+isIntegralType (typename, ptrList)
+    | typename == "char"  = isntPtr
+    | typename == "short" = isntPtr
+    | typename == "int"   = isntPtr
+    | typename == "long"  = isntPtr
     | otherwise           = False
+  where
+    isntPtr = null ptrList
 
+isPointerType :: DataType -> Bool
+isPointerType (_, ptrList) = not (null ptrList)
 
-isImplicitCastAllowed :: String -> String -> Bool
+isFloatType :: DataType -> Bool
+isFloatType (typename, ptrList)
+    | typename == "float" = isntPtr
+    | otherwise           = False
+  where
+    isntPtr = null ptrList
+
+isBoolType :: DataType -> Bool
+isBoolType (typename, ptrList)
+    | typename == "bool" = isntPtr
+    | otherwise          = False
+  where
+    isntPtr = null ptrList
+    
+isVoidType :: DataType -> Bool
+isVoidType (typename, ptrList)
+    | typename == "void" = isntPtr
+    | otherwise          = False
+  where
+    isntPtr = null ptrList
+
+isImplicitCastAllowed :: DataType -> DataType -> Bool
 isImplicitCastAllowed type1 type2 =
     implicitCastAllowedSingle type1 type2 || implicitCastAllowedSingle type2 type1
   where
-    implicitCastAllowedSingle :: String -> String -> Bool
+    implicitCastAllowedSingle :: DataType -> DataType -> Bool
     implicitCastAllowedSingle type1 type2
+        | isIntegralType type1 && isFloatType type2    = True
         | type1 == type2                               = True
         | isIntegralType type1 && isIntegralType type2 = True
-        | isIntegralType type1 && type2 == "float"     = True
+        | pointerMatches type1 type2                   = True
         | otherwise                                    = False
-    
-typeCheckAssignOp :: AssignmentOp -> String -> SyntaxNode -> Environment -> Bool
-typeCheckAssignOp op varName rhs env = case op of
-    NoOp    -> isImplicitCastAllowed rhsType varType
-    PlusEq  -> typeCheckBinaryOp Addition rhs (IdentifierNode varName) env
-    MinusEq -> typeCheckBinaryOp Subtraction rhs (IdentifierNode varName) env
-    MulEq   -> typeCheckBinaryOp Multiplication rhs (IdentifierNode varName) env
-    DivEq   -> typeCheckBinaryOp Division rhs (IdentifierNode varName) env
-    ModEq   -> typeCheckBinaryOp Mod rhs (IdentifierNode varName) env
-  where
-    rhsType = decltype rhs env
-    varType = decltype (IdentifierNode varName) env
+      where
+        pointerMatches (lhsType, lhsPtrList) (rhsType, rhsPtrList) = lhsType == rhsType && length lhsPtrList == length rhsPtrList
 
-typeCheckBinaryOp :: BinaryOp -> SyntaxNode -> SyntaxNode -> Environment -> Bool
-typeCheckBinaryOp op lhs rhs env
-    | op == Addition           = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == Multiplication     = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == Subtraction        = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == Division           = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == Mod                = neitherIsString && isIntegralType lhsType && isIntegralType rhsType
-    | op == Equal              = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == NotEqual           = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == LessThan           = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == GreaterThan        = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == GreaterThanOrEqual = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == LessThanOrEqual    = neitherIsString && isImplicitCastAllowed lhsType rhsType
-    | op == Or                 = neitherIsString && lhsType == "bool" && rhsType == "bool"
-    | op == And                = neitherIsString && lhsType == "bool" && rhsType == "bool"
+typeCheckAssignOp :: AssignmentOp -> SyntaxNode -> SyntaxNode -> Environment -> Bool
+typeCheckAssignOp op lhs rhs env = case op of
+    NoOp    -> isImplicitCastAllowed lhsType rhsType
+    PlusEq  -> typeCheckBinaryOp Addition lhs rhs env
+    MinusEq -> typeCheckBinaryOp Subtraction lhs rhs env
+    MulEq   -> typeCheckBinaryOp Multiplication lhs rhs env
+    DivEq   -> typeCheckBinaryOp Division lhs rhs env
+    ModEq   -> typeCheckBinaryOp Mod lhs rhs env
   where
     lhsType = decltype lhs env
     rhsType = decltype rhs env
-    neitherIsString = lhsType /= "string" && rhsType /= "string"
+
+typeCheckBinaryOp :: BinaryOp -> SyntaxNode -> SyntaxNode -> Environment -> Bool
+typeCheckBinaryOp op lhs rhs env
+    | op == Addition           = isImplicitCastAllowed lhsType rhsType || isPointerArithmetic op lhsType rhsType
+    | op == Multiplication     = isImplicitCastAllowed lhsType rhsType
+    | op == Subtraction        = isImplicitCastAllowed lhsType rhsType || isPointerArithmetic op lhsType rhsType
+    | op == Division           = isImplicitCastAllowed lhsType rhsType
+    | op == Mod                = isIntegralType lhsType && isIntegralType rhsType
+    | op == Equal              = isImplicitCastAllowed lhsType rhsType
+    | op == NotEqual           = isImplicitCastAllowed lhsType rhsType
+    | op == LessThan           = isImplicitCastAllowed lhsType rhsType
+    | op == GreaterThan        = isImplicitCastAllowed lhsType rhsType
+    | op == GreaterThanOrEqual = isImplicitCastAllowed lhsType rhsType
+    | op == LessThanOrEqual    = isImplicitCastAllowed lhsType rhsType
+    | op == Or                 = isBoolType lhsType && isBoolType rhsType
+    | op == And                = isBoolType lhsType && isBoolType rhsType
+  where
+    lhsType = decltype lhs env
+    rhsType = decltype rhs env
+    isPointerArithmetic :: BinaryOp -> DataType -> DataType -> Bool
+    isPointerArithmetic op lhsType rhsType = 
+        isPointerArithmeticSingle op lhsType rhsType || isPointerArithmeticSingle op rhsType lhsType
+      where
+        isPointerArithmeticSingle :: BinaryOp -> DataType -> DataType -> Bool
+        isPointerArithmeticSingle op lhsType rhsType
+          | op == Addition = isIntegralType lhsType && isPointerType rhsType
+          | op == Subtraction = (isIntegralType lhsType && isPointerType rhsType) || (isPointerType lhsType && lhsType == rhsType)
+        
 
 typeCheckUnaryOp :: UnaryOp -> SyntaxNode -> Environment -> Bool
-typeCheckUnaryOp Negate sub env
-    | subType == "string" = False
-    | subType == "bool"   = False
-    | otherwise           = True
+typeCheckUnaryOp op sub env
+    | op == Negate       = isIntegralType subType || isFloatType subType
+    | op == Not          = isBoolType subType
+    | op == Dereference  = isPointerType subType
+    | op == Reference    = case sub of (IdentifierNode _) -> True
+                                       _                  -> False
   where
     subType = decltype sub env
-typeCheckUnaryOp Not sub env
-    | subType == "bool" = True
-    | otherwise         = False
+
+typeCheckArrayIndex :: SyntaxNode -> SyntaxNode -> Environment -> Bool
+typeCheckArrayIndex arr idx env = isPointerType arrType && isIntegralType idxType
   where
-    subType = decltype sub env
+    arrType = decltype arr env
+    idxType = decltype idx env
 
 validateSyntaxNode :: SyntaxNode -> Environment -> (Environment, Bool)
 validateSyntaxNode statement env = case statement of
-    FunctionCallNode name args -> (env, validateCall statement env)
+    FunctionCallNode name args -> (env, all (\x -> snd (validateSyntaxNode x env)) args
+                                        && validateCall statement env)
     LiteralNode ct -> (env, True)
     IdentifierNode name -> (env, isJust $ lookupVar name env)
     ParenthesisNode sub -> validateSyntaxNode sub env
@@ -114,8 +155,12 @@ validateSyntaxNode statement env = case statement of
                                      && typeCheckBinaryOp op lhs rhs env)
     UnaryOpNode op sub -> (env, snd (validateSyntaxNode sub env)
                                 && typeCheckUnaryOp op sub env)
-    AssignmentNode varName op rhs -> (env, snd (validateSyntaxNode rhs env)
-                                           && typeCheckAssignOp op varName rhs env)
+    ArrayIndexNode arr idx -> (env, snd (validateSyntaxNode arr env)
+                                    && snd (validateSyntaxNode idx env)
+                                    && typeCheckArrayIndex arr idx env)
+    AssignmentNode lhs op rhs -> (env, snd (validateSyntaxNode rhs env)
+                                       && snd (validateSyntaxNode lhs env)
+                                       && typeCheckAssignOp op lhs rhs env)
     
     SeqNode left right -> let (modifiedEnv, valid) = validateSyntaxNode left env in
         if valid
@@ -124,13 +169,13 @@ validateSyntaxNode statement env = case statement of
         else
             (env, False)
     WhileNode condition block -> (env, snd (validateSyntaxNode condition env)
-                                       && isImplicitCastAllowed (decltype condition env) "bool"
+                                       && isImplicitCastAllowed (decltype condition env) ("bool", [])
                                        && snd (validateSyntaxNode block $ EnvLink M.empty env))
     IfNode condition block -> (env, snd (validateSyntaxNode condition env)
-                                    && isImplicitCastAllowed (decltype condition env) "bool"
+                                    && isImplicitCastAllowed (decltype condition env) ("bool", [])
                                     && snd (validateSyntaxNode block $ EnvLink M.empty env))
     IfElseNode condition block elseBlock -> (env, snd (validateSyntaxNode condition env)
-                                                  && isImplicitCastAllowed (decltype condition env) "bool"
+                                                  && isImplicitCastAllowed (decltype condition env) ("bool", [])
                                                   && snd (validateSyntaxNode block $ EnvLink M.empty env)
                                                   && snd (validateSyntaxNode elseBlock $ EnvLink M.empty env))
     ReturnNode expr -> let Just (FunctionVar currentFunctionRetType _) = lookupVar "$currentFunction" env in
@@ -166,60 +211,91 @@ classifySize tp
     | tp == "int"    = 4
     | tp == "long"   = 8
     | tp == "float"  = 8
-    | tp == "string" = 0
     | otherwise      = 0
 
-largestType :: String -> String -> String
-largestType t1 t2 = snd $ maximum (zip (map classifySize typeList) typeList)
+largestType :: DataType -> DataType -> DataType
+largestType t1 t2 = snd $ maximum (zip (map (classifySize . fst) typeList) typeList)
   where
     typeList = [t1, t2]
 
-binaryTypeResult :: BinaryOp -> String -> String -> String
+binaryTypeResult :: BinaryOp -> DataType -> DataType -> DataType
 binaryTypeResult op lhsType rhsType
-    | op == Addition           = decideBasicOp lhsType rhsType
-    | op == Multiplication     = decideBasicOp lhsType rhsType
-    | op == Subtraction        = decideBasicOp lhsType rhsType
-    | op == Division           = decideBasicOp lhsType rhsType
+    | op == Addition           = decideAddition lhsType rhsType
+    | op == Multiplication     = decideMultiplication lhsType rhsType
+    | op == Subtraction        = decideSubtraction lhsType rhsType
+    | op == Division           = decideDivision lhsType rhsType
     | op == Mod                = largestType lhsType rhsType
-    | op == Equal              = "bool"
-    | op == NotEqual           = "bool"
-    | op == LessThan           = "bool"
-    | op == GreaterThan        = "bool"
-    | op == GreaterThanOrEqual = "bool"
-    | op == LessThanOrEqual    = "bool"
-    | op == Or                 = "bool"
-    | op == And                = "bool"
+    | op == Equal              = ("bool", [])
+    | op == NotEqual           = ("bool", [])
+    | op == LessThan           = ("bool", [])
+    | op == GreaterThan        = ("bool", [])
+    | op == GreaterThanOrEqual = ("bool", [])
+    | op == LessThanOrEqual    = ("bool", [])
+    | op == Or                 = ("bool", [])
+    | op == And                = ("bool", [])
   where
-    decideBasicOp lhs rhs
+    decideAddition lhs rhs
+    -- ptr + integral (ptr)
+        | isPointerType lhsType && isIntegralType rhsType = lhsType
+        | isPointerType rhsType && isIntegralType lhsType = rhsType
+    -- integral + integral (largest of 2)
         | isIntegralType lhsType && isIntegralType rhsType = largestType lhsType rhsType
-        | lhsType == "float" || rhsType == "float" = "float"
-        | otherwise = "invalid"
+    -- integral + float (float)
+        | isIntegralType lhsType && isFloatType rhsType = ("float", [])
+    -- float + float (float)
+        | isFloatType lhsType && isFloatType rhsType = ("float", [])
+    -- anything else = invalid
+        | otherwise = ("invalid", [])
+    decideMultiplication lhs rhs
+    -- either are pointers -> not allowed
+        | isPointerType lhsType || isPointerType rhsType = ("invalid", [])
+        | otherwise = decideAddition lhs rhs
+    decideSubtraction lhs rhs
+    -- ptr - ptr (long)
+        | isPointerType lhsType && isPointerType rhsType = ("long", [])
+        | isPointerType rhsType && isPointerType lhsType = ("long", [])
+        | otherwise = decideAddition lhs rhs
+    decideDivision = decideMultiplication
 
-unaryTypeResult :: UnaryOp -> String -> String
+unaryTypeResult :: UnaryOp -> DataType -> DataType
 unaryTypeResult op subType
-    | op == Negate = subType
+    | op == Negate = decideNegate subType
+    | op == Not    = decideNot subType
+    | op == Reference   = decideReference subType
+    | op == Dereference = decideDereference subType
+  where
+    decideNegate tp
+      | isFloatType tp || isIntegralType tp = tp
+      | otherwise = ("invalid", [])
+    decideNot tp
+      | isBoolType tp = tp
+      | otherwise     = ("invalid", [])
+    decideReference (typeName, ptrList) = (typeName, 0:ptrList)
+    decideDereference (typeName, ptrList)
+      | not (null ptrList) = (typeName, tail ptrList)
+      | otherwise          = ("invalid", [])
 
-decltype :: SyntaxNode -> Environment -> String
-decltype EmptyNode env = "void"
+decltype :: SyntaxNode -> Environment -> DataType
+decltype EmptyNode env = ("void", [])
 decltype (IdentifierNode varName) env =
     case maybeVarInfo of
-        Nothing -> "invalid"
+        Nothing -> ("invalid", [])
         Just varInfo -> case varInfo of
-                            (FunctionVar _ _) -> "invalid"
+                            (FunctionVar _ _) -> ("invalid", [])
                             (PrimitiveVar tp) -> tp
   where 
     maybeVarInfo = lookupVar varName env
 decltype (LiteralNode constantType) _ = case constantType of
-    IntConstant _    -> "int"
-    FloatConstant _  -> "float"
-    BoolConstant _   -> "bool"
-    StringConstant _ -> "string"
+    IntConstant _    -> ("int", [])
+    FloatConstant _  -> ("float", [])
+    BoolConstant _   -> ("bool", [])
+    StringConstant str -> ("char", [length str])
 decltype (FunctionCallNode funcName _) env =
     case maybeFuncInfo of
-        Nothing -> "invalid"
+        Nothing -> ("invalid", [])
         Just funcInfo -> case funcInfo of
                             (FunctionVar returnTp _) -> returnTp
-                            (PrimitiveVar _) -> "invalid"
+                            (PrimitiveVar _) -> ("invalid", [])
   where 
     maybeFuncInfo = lookupVar funcName env
 decltype (ParenthesisNode sub) env = decltype sub env
@@ -230,15 +306,10 @@ decltype (BinaryOpNode op lhs rhs) env = binaryTypeResult op lhsType rhsType
 decltype (UnaryOpNode op sub) env = unaryTypeResult op subType
   where
     subType = decltype sub env
-decltype (AssignmentNode assName op rhs) env =
-    case maybeVarInfo of
-        Nothing -> "invalid"
-        Just varInfo -> case varInfo of
-                            (FunctionVar _ _) -> "invalid"
-                            (PrimitiveVar tp) -> tp
-  where 
-    maybeVarInfo = lookupVar assName env
-
+decltype (ArrayIndexNode arr idx) env = unaryTypeResult Dereference subType
+  where
+    subType = decltype arr env
+decltype (AssignmentNode lhs op rhs) env = decltype lhs env
 
 validateCall :: SyntaxNode -> Environment -> Bool
 validateCall (FunctionCallNode name args) env =
@@ -247,9 +318,6 @@ validateCall (FunctionCallNode name args) env =
         _                               -> False
   where
     funcInfo = lookupVar name env
-    typeCheck :: Environment -> (String, SyntaxNode) -> Bool
+    typeCheck :: Environment -> (DataType, SyntaxNode) -> Bool
     typeCheck env (expectedType, paramExpr) = isImplicitCastAllowed (decltype paramExpr env) expectedType
 validateCall _ _ = False
-
--- f(false)
--- void f(int x);
