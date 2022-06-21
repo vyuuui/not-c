@@ -38,7 +38,7 @@ Operand forms:
     <destop> = <variable> | <memref>
     <srcop> = &?<variable> | <memref> | <constant>
     <variable> = <varname>
-    <memref> = [<varname> (+ offset)?]  // note: offset should be treated as a raw byte offset!
+    <memref> = [&?<varname> (+ offset)?]  // note: offset should be treated as a raw byte offset!
     <constant> = integral | floating | global-constant | label
 
 opcode type specifier:

@@ -1,20 +1,19 @@
-beginsubroutine add
-beginframeinfo
-in t0 int64
-in t1 int64
-endframeinfo
-label add
-mul t0 t1 t0
-return t0
-endsubroutine
+.sub main
+local t0 int8 10
+local t1 int64
+local t2 int64
+.endframe
+.label main
 
-beginsubroutine main
-beginframeinfo
-local t0 int64
-endframeinfo
-label main
-param 15::int8 int64
-param 2::int8 int64
-call add t0
-return t0
-endsubroutine
+mov t0 10::int64
+mov t1 0::int64
+mov t2 &t0
+.label main_l0
+mov [t2]::int64 t1
+add t1 t1 1::int64
+add t2 t2 1::int64
+cmp t1 3::int64
+jlt main_l0
+return [&t0 + 2]::int8
+
+.endsub

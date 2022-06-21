@@ -15,6 +15,25 @@
 
 constexpr size_t kPrimitiveMaxSize = 8;
 
+void trim_whitespace(std::string& str) {
+    int left = 0, right = str.size() - 1;
+    for (; left < str.size(); left++) {
+        if (!isspace(str[left])) {
+            break;
+        }
+    }
+    for (; right >= 0; right--) {
+        if (!isspace(str[right])) {
+            break;
+        }
+    }
+    if (left >= right) {
+        str = "";
+    } else {
+        str = str.substr(left, right - left + 1);
+    }
+}
+
 class ProgramStack {
 public:
     void* get_stack_var(int64_t byte_off) {
@@ -101,6 +120,7 @@ struct VariableInfo {
     int64_t stack_offset;
     BaseType type_info;
     StorageType storage_type;
+    size_t count;
     std::string variable_name;
 };
 
@@ -203,24 +223,35 @@ private:
 
 class MemoryOperand : public Operand {
 public:
-    MemoryOperand(BaseType base_type, uint64_t var_stack_offset, int64_t offset)
-        : Operand(base_type), var_stack_offset(var_stack_offset), offset(offset) {}
+    MemoryOperand(BaseType base_type, uint64_t var_stack_offset, int64_t offset, bool is_ref)
+        : Operand(base_type), var_stack_offset(var_stack_offset), offset(offset), is_ref(is_ref) {}
 
     void set_generic(void* value, size_t size) override {
         const uint64_t frame_base = ctx.current_sub_base;
-        int64_t stack_pointer = *reinterpret_cast<int64_t*>(
-            ctx.stack.get_stack_var(frame_base + var_stack_offset));
-        ctx.stack.set_stack_var(stack_pointer + offset, value, size);
+        if (is_ref) {
+            int64_t stack_pointer = frame_base + var_stack_offset;
+            ctx.stack.set_stack_var(stack_pointer + offset, value, size);
+        } else {
+            int64_t stack_pointer = *reinterpret_cast<int64_t*>(
+                ctx.stack.get_stack_var(frame_base + var_stack_offset));
+            ctx.stack.set_stack_var(stack_pointer + offset, value, size);
+        }
     }
     
     void* get_generic() override {
         const uint64_t frame_base = ctx.current_sub_base;
-        int64_t stack_pointer = *reinterpret_cast<int64_t*>(
-            ctx.stack.get_stack_var(frame_base + var_stack_offset));
-        return ctx.stack.get_stack_var(stack_pointer + offset);
+        if (is_ref) {
+            int64_t stack_pointer = frame_base + var_stack_offset;
+            return ctx.stack.get_stack_var(stack_pointer + offset);
+        } else {
+            int64_t stack_pointer = *reinterpret_cast<int64_t*>(
+                ctx.stack.get_stack_var(frame_base + var_stack_offset));
+            return ctx.stack.get_stack_var(stack_pointer + offset);
+        }
     }
 
 private:
+    bool is_ref;
     uint64_t var_stack_offset;
     int64_t offset;
 };
@@ -582,36 +613,36 @@ public:
         }
         switch (condition) {
         case JmpCondition::None:
-            ctx.program_counter = dest->get<uint64_t>();
+            ctx.program_counter = dest->get<uint64_t>() - 1;
             break;
         case JmpCondition::Eq:
             if (ctx.compare_equal) {
-                ctx.program_counter = dest->get<uint64_t>();
+                ctx.program_counter = dest->get<uint64_t>() - 1;
             }
             break;
         case JmpCondition::NotEq:
             if (!ctx.compare_equal) {
-                ctx.program_counter = dest->get<uint64_t>();
+                ctx.program_counter = dest->get<uint64_t>() - 1;
             }
             break;
         case JmpCondition::Lt:
             if (ctx.compare_sign != ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>();
+                ctx.program_counter = dest->get<uint64_t>() - 1;
             }
             break;
         case JmpCondition::Le:
             if (ctx.compare_equal || ctx.compare_sign != ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>();
+                ctx.program_counter = dest->get<uint64_t>() - 1;
             }
             break;
         case JmpCondition::Ge:
             if (ctx.compare_sign == ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>();
+                ctx.program_counter = dest->get<uint64_t>() - 1;
             }
             break;
         case JmpCondition::Gt:
             if (ctx.compare_equal && ctx.compare_sign == ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>();
+                ctx.program_counter = dest->get<uint64_t>() - 1;
             }
             break;
         }
@@ -667,7 +698,12 @@ public:
     
     void execute(CpuContext& ctx) override {
         auto dest = reinterpret_cast<LabelOperand*>(operands[0]);
-        auto called_subroutine = &ctx.subroutine_map[dest->get_name()];
+        auto it = ctx.subroutine_map.find(dest->get_name());
+        if (it == ctx.subroutine_map.end()) {
+            std::string* msg = new std::string(std::string("Invalid subroutine name \"") + dest->get_name() + "\"");
+            throw msg->c_str();
+        }
+        auto called_subroutine = &it->second;
         ctx.call_stack.push(SubroutineRetInfo {
             .return_address = ctx.program_counter + 1,
             .return_store = operands.size() > 1 ? operands[1] : nullptr,
@@ -787,24 +823,25 @@ public:
 };
 
 Operand* parse_destop(std::string& op, SubroutineInfo const& current_sub) {
-    std::regex memref_re("^\\[([a-zA-Z0-9_-]+)(?:([+-])([0-9]+))?\\]::"
-                      "(int8|int16|int32|int64|float)\\s*(.*)$");
+    std::regex memref_re("^\\[(&?)([a-zA-Z0-9_-]+)\\s*(?:([+-])\\s*([0-9]+))?\\]::"
+                         "(int8|int16|int32|int64|float)\\s*(.*)$");
     std::regex varref_re("^([a-zA-Z_][a-zA-Z_0-9]*)\\s*(.*)$");
     std::smatch matches;
     Operand* ret;
     if (std::regex_match(op, matches, memref_re)) {
-        std::string varname = matches[1];
+        std::string varname = matches[2];
         auto it = current_sub.variable_map.find(varname);
         if (it == current_sub.variable_map.end()) {
             return nullptr;
         }
-        std::string offset_str = matches[3];
+        std::string offset_str = matches[4];
         int offset = strtol(offset_str.c_str(), nullptr, 10);
-        if (matches[2] == "-") {
+        if (matches[3] == "-") {
             offset = -offset;
         }
-        ret = new MemoryOperand(it->second.type_info, it->second.stack_offset, offset);
-        op = matches[5];
+        BaseType cast_type = type_from_string(matches[5]);
+        ret = new MemoryOperand(cast_type, it->second.stack_offset, offset, matches[1] == "&");
+        op = matches[6];
     } else if (std::regex_match(op, matches, varref_re)) {
         std::string varname = matches[1];
         auto it = current_sub.variable_map.find(varname);
@@ -993,17 +1030,6 @@ Instruction* parse_param(std::string const& args, SubroutineInfo const& current_
     return new Param({srcop}, type);
 }
 
-Instruction* parse_label(std::string const& args, size_t address, SubroutineInfo const& current_sub) {
-    std::regex label_re("^([a-zA-Z_][a-zA-Z_0-9]*)\\s*(.*)$");
-    std::smatch matches;
-    if (!std::regex_match(args, matches, label_re)) {
-        return nullptr;
-    }
-    ctx.label_map[matches[1]] = address;
-    
-    return new NopInstruction(std::vector<Operand*> {});
-}
-
 Instruction* parse_return(std::string const& args, SubroutineInfo const& current_sub) {
     std::string op = args;
     std::regex empty_re("\\s*$");
@@ -1053,7 +1079,7 @@ Instruction* parse_floattoint(std::string const& args, SubroutineInfo const& cur
     return new FloatToInt({des, srcop});
 }
 
-Instruction* parseInstruction(std::string line, size_t instruction_address, SubroutineInfo const& current_sub) {
+Instruction* parse_instruction(std::string line, size_t instruction_address, SubroutineInfo const& current_sub) {
     Instruction* instr = nullptr;
     std::regex optype("^\\s*(mov|add|sub|mul|div|mod|cmp|jmp|je|jne|jgt|jlt|jge|jle|param|label|call|return|arraycopy|inttofloat|floattoint)\\s*(.*)$");
     std::smatch matches;
@@ -1092,8 +1118,6 @@ Instruction* parseInstruction(std::string line, size_t instruction_address, Subr
         instr = parse_jmp(rest, JmpCondition::Le, current_sub);
     } else if (name == "param") {
         instr = parse_param(rest, current_sub);
-    } else if (name == "label") {
-        instr = parse_label(rest, instruction_address, current_sub);
     } else if (name == "call") {
         instr = parse_call(rest, current_sub);
     } else if (name == "return") {
@@ -1108,9 +1132,9 @@ Instruction* parseInstruction(std::string line, size_t instruction_address, Subr
     return instr;
 }
 
-std::optional<VariableInfo> parseFrameVariable(std::string line) {
+std::optional<VariableInfo> parse_frame_variable(std::string line) {
     std::regex re("^\\s*(in|local|temp)\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s+"
-                  "(int8|int16|int32|int64|float)\\s*$");
+                  "(int8|int16|int32|int64|float)(?:\\s+(\\d+))?\\s*$");
     std::smatch re_results;
     if (!std::regex_match(line, re_results, re)) {
         return std::nullopt;
@@ -1118,6 +1142,7 @@ std::optional<VariableInfo> parseFrameVariable(std::string line) {
 
     VariableInfo vi;
     vi.stack_offset = 0;
+    vi.count = 1;
     if (re_results[1] == "in") {
         vi.storage_type = StorageType::Parameter;
     } else if (re_results[1] == "local") {
@@ -1127,32 +1152,31 @@ std::optional<VariableInfo> parseFrameVariable(std::string line) {
     }
     vi.variable_name = re_results[2];
     vi.type_info = type_from_string(re_results[3]);
+    std::string arr_count = re_results[4];
+    if (!arr_count.empty()) {
+        if (vi.storage_type == StorageType::Parameter) {
+            throw "Parameters are not allowed to be arrays";
+        }
+        vi.count = strtoll(arr_count.c_str(), nullptr, 10);
+    }
 
     return vi;
 }
 
 std::optional<std::unordered_map<std::string, VariableInfo>>
-parseFrameDescription(std::ifstream& file) {
+parse_frame_description(std::ifstream& file) {
     std::unordered_map<std::string, VariableInfo> map;
     std::string line;
-    while (line.empty()) {
+    for (std::getline(file, line);
+         line.find(".endframe") == std::string::npos;
+         std::getline(file, line)) {
         if (file.eof()) {
-            throw "Unexpected EOF in parseFrameDescription";
-        }
-        std::getline(file, line);
-    }
-    if (line.find("beginframeinfo") == std::string::npos) {
-        return std::nullopt;
-    }
-
-    for (std::getline(file, line); line != "endframeinfo"; std::getline(file, line)) {
-        if (file.eof()) {
-            throw "Unexpected EOF in parseFrameDescription";
+            throw "Unexpected EOF in parse_frame_description";
         }
         if (line.empty()) {
             continue;
         }
-        std::optional<VariableInfo> vi = parseFrameVariable(line);
+        std::optional<VariableInfo> vi = parse_frame_variable(line);
         if (vi == std::nullopt) {
             return std::nullopt;
         }
@@ -1161,7 +1185,7 @@ parseFrameDescription(std::ifstream& file) {
     return map;
 }
 
-std::optional<SubroutineInfo> parseSubroutine(std::ifstream& file, std::vector<Instruction*>& program) {
+std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<Instruction*>& program) {
     std::string line = "";
     while (line.empty()) {
         if (file.eof()) {
@@ -1170,7 +1194,7 @@ std::optional<SubroutineInfo> parseSubroutine(std::ifstream& file, std::vector<I
         std::getline(file, line);
     }
 
-    std::regex re("^\\s*beginsubroutine\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s*$");
+    std::regex re("^\\s*.sub\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s*$");
     std::smatch matches;
     if (!std::regex_match(line, matches, re)) {
         return std::nullopt;
@@ -1180,14 +1204,14 @@ std::optional<SubroutineInfo> parseSubroutine(std::ifstream& file, std::vector<I
     si.subroutine_name = matches[1];
     si.frame_size = 0;
     si.params_size = 0;
-    auto frame_vars = parseFrameDescription(file);
+    auto frame_vars = parse_frame_description(file);
     if (!frame_vars) {
         return std::nullopt;
     }
     uint64_t cur_stackoff = 0;
     // compute frame size, params size, and parameter stack offsets
     for (auto&& [k, var_info] : *frame_vars) {
-        const size_t var_size = base_type_size(var_info.type_info);
+        const size_t var_size = base_type_size(var_info.type_info) * var_info.count;
         si.frame_size += var_size;
         if (var_info.storage_type == StorageType::Parameter) {
             si.params_size += var_size;
@@ -1198,7 +1222,7 @@ std::optional<SubroutineInfo> parseSubroutine(std::ifstream& file, std::vector<I
     // compute stack offset for non-parameters
     for (auto&& [k, var_info] : *frame_vars) {
         if (var_info.storage_type != StorageType::Parameter) {
-            const size_t var_size = base_type_size(var_info.type_info);
+            const size_t var_size = base_type_size(var_info.type_info) * var_info.count;
             var_info.stack_offset = cur_stackoff;
             cur_stackoff += var_size;
         }
@@ -1206,14 +1230,29 @@ std::optional<SubroutineInfo> parseSubroutine(std::ifstream& file, std::vector<I
     si.variable_map = std::move(*frame_vars);
 
     // parse instructions
-    for (std::getline(file, line); line != "endsubroutine"; std::getline(file, line)) {
+    for (std::getline(file, line);
+         line.find(".endsub") == std::string::npos;
+         std::getline(file, line)) {
         if (file.eof()) {
-            throw "Unexpected EOF in parseSubroutine";
+            throw "Unexpected EOF in parse_subroutine";
         }
+
+        trim_whitespace(line);
         if (line.empty()) {
             continue;
         }
-        program.push_back(parseInstruction(line, program.size(), si));
+        std::regex label_re("^\\.label\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s*$");
+        std::smatch match;
+        if (std::regex_match(line, match, label_re)) {
+            ctx.label_map[match[1]] = program.size();
+        } else {
+            Instruction* inst = parse_instruction(line, program.size(), si);
+            if (inst == nullptr) {
+                std::string* err = new std::string(std::string("Failed to parse line: ") + line);
+                throw err->c_str();
+            }
+            program.push_back(inst);
+        }
     }
 
     return si;
@@ -1225,37 +1264,36 @@ int main() {
     std::string line;
     std::vector<Instruction*> program;
 
-    auto subroutine = parseSubroutine(asm_file, program);
-    while (subroutine) {
-        ctx.subroutine_map[subroutine->subroutine_name] = subroutine.value();
-        subroutine = parseSubroutine(asm_file, program);
-    }
-
-    ctx.current_sub_base = 8;
-    VarOperand program_ret(BaseType::Int64, 0);
-    SubroutineInfo main_call{
-        .frame_size = 8,
-        .params_size = 0,
-    };
-    ctx.stack.change_size(8);
-    ctx.call_stack.push(SubroutineRetInfo{
-        .return_address = program.size(),
-        .return_store = &program_ret,
-        .return_sub = &main_call,
-    });
-    asm_file.close();
-    ctx.current_sub = &ctx.subroutine_map["main"];
-    ctx.program_counter = ctx.label_map["main"];
-    ctx.stack.change_size(ctx.current_sub->frame_size - ctx.current_sub->params_size);
     try {
+        auto subroutine = parse_subroutine(asm_file, program);
+        while (subroutine) {
+            ctx.subroutine_map[subroutine->subroutine_name] = subroutine.value();
+            subroutine = parse_subroutine(asm_file, program);
+        }
+
+        ctx.current_sub_base = 8;
+        VarOperand program_ret(BaseType::Int64, 0);
+        SubroutineInfo main_call{
+            .frame_size = 8,
+            .params_size = 0,
+        };
+        ctx.stack.change_size(8);
+        ctx.call_stack.push(SubroutineRetInfo{
+            .return_address = program.size(),
+            .return_store = &program_ret,
+            .return_sub = &main_call,
+        });
+        asm_file.close();
+        ctx.current_sub = &ctx.subroutine_map["main"];
+        ctx.program_counter = ctx.label_map["main"];
+        ctx.stack.change_size(ctx.current_sub->frame_size - ctx.current_sub->params_size);
         while (ctx.program_counter < program.size()) {
             program[ctx.program_counter]->execute(ctx);
-            std::cout << "PC = " << ctx.program_counter << std::endl;
             ctx.program_counter++;
         }
+        std::cout << "Done, returned " << program_ret.get<int64_t>() << std::endl;
     } catch (const char* err) {
-        std::cout << "Error!" << err << std::endl;
+        std::cout << "Error: " << err << std::endl;
     }
-    std::cout << "Done, returned " << program_ret.get<int64_t>() << std::endl;
     return 0;
 }
