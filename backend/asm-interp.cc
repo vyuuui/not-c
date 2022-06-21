@@ -1135,7 +1135,12 @@ std::optional<std::unordered_map<std::string, VariableInfo>>
 parseFrameDescription(std::ifstream& file) {
     std::unordered_map<std::string, VariableInfo> map;
     std::string line;
-    std::getline(file, line);
+    while (line.empty()) {
+        if (file.eof()) {
+            throw "Unexpected EOF in parseFrameDescription";
+        }
+        std::getline(file, line);
+    }
     if (line.find("beginframeinfo") == std::string::npos) {
         return std::nullopt;
     }
@@ -1143,6 +1148,9 @@ parseFrameDescription(std::ifstream& file) {
     for (std::getline(file, line); line != "endframeinfo"; std::getline(file, line)) {
         if (file.eof()) {
             throw "Unexpected EOF in parseFrameDescription";
+        }
+        if (line.empty()) {
+            continue;
         }
         std::optional<VariableInfo> vi = parseFrameVariable(line);
         if (vi == std::nullopt) {
