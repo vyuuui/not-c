@@ -1,19 +1,20 @@
-mov r0 123i64
-mov ti64_abc 321i64
-add r0 r0 ti64_abc
-sub r0 r0 5
-cmp r0 439i64
-je 2
-mov r0 0i64
-mov r1 1i32
-mov r2 99i8
-pushs
-mov ti64_abc 9999i32
-cmp ti64_abc 9999i32
-je 1
-pops
-mov r7 64i64
-print 1i64
-print r7
-print ti64_abc
-print r0
+beginsubroutine add
+beginframeinfo
+in t0 int64
+in t1 int64
+endframeinfo
+label add
+mul t0 t1 t0
+return t0
+endsubroutine
+
+beginsubroutine main
+beginframeinfo
+local t0 int64
+endframeinfo
+label main
+param 15::int8 int64
+param 2::int8 int64
+call add t0
+return t0
+endsubroutine

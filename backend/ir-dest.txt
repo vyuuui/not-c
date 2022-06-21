@@ -16,7 +16,7 @@ IR format:
                <subroutine body>
                <subroutine terminator>
 <subroutine declaration> = 'beginsubroutine' name
-<frame description> = 'beginframeinfo' size
+<frame description> = 'beginframeinfo'
                       <frame vars list>
                       'endframeinfo'
 <frame vars list> = ('in' | 'local' | 'temp') name type (repeats)
@@ -36,7 +36,7 @@ note: if both 'ptr' and 'arr' are specified, it is an array of pointer type
 Instruction format (fills for <instruction>)
 Operand forms:
     <destop> = <variable> | <memref>
-    <srcop> = <variable> | <memref> | <constant>
+    <srcop> = &?<variable> | <memref> | <constant>
     <variable> = <varname>
     <memref> = [<varname> (+ offset)?]  // note: offset should be treated as a raw byte offset!
     <constant> = integral | floating | global-constant | label
@@ -46,7 +46,7 @@ opcode type specifier:
     if omitted, the instruction will default to the type of its destination as its net type
     e.g. let t3 : int8, t4 : float, t5 : int64, t6 : ptr int32
     mov t3 t4  -> typed as int8
-    mov t4 r5  -> typed as float
+    mov t4 t5  -> typed as float
     mov float t3 t4 -> typed as float
 
 Operand type rules:
@@ -72,11 +72,12 @@ opcodes:
         jmp label
         jc label  // (c=e | ne | gt | lt | ge | le)
     function control flow:
-        param <name> <srcop>
-        call label  // label must be a subroutine
-        return [type] <srcop>
+        param <srcop>
+        label <name>
+        call label <destop>  // label must be a subroutine
+        return <srcop>
         return  // for void return type
     compiler-library:
         arraycopy <destop> <srcop> size  // size is specified in bytes
-        inttofloat <destop> <srcop> srcoptype  // srcoptype must be integral (int8, int16, int32, int64)
-        floattoint <destop> <srcop> destoptype  // destoptype must be same as above ^^
+        inttofloat <destop> <srcop>
+        floattoint <destop> <srcop>
