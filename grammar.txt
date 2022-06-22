@@ -2,7 +2,7 @@ prog = function+
 function = type identifier '(' paramlist ')' block
 paramlist = type identifier (',' type identifier)* | ε
 block = '{' stmt* '}'
-stmt = declaration ';' | block | expression ';' | conditional | loop | ret ';'
+stmt = declaration ';' | block | expression ';' | conditional | loop | ret ';' | 'continue' ';' | 'break' ';'
 declaration = type identifier optassign
 optassign = '=' expression | ε
 loop = 'while' '(' expression ')' block
@@ -10,41 +10,24 @@ conditional = 'if' '(' expression ')' block elseconditional
 elseconditional = 'else' block | ε
 ret = 'return' expression
 expression = assignment
-assignment = identifier '=' assignment  | identifier '+=' assignment |
-             identifier '-=' assignment | identifier '*=' assignment |
-             identifier '/=' assignment | identifier '%=' assignment | logicor
+assignment = lvalue '=' assignment  | lvalue '+=' assignment |
+             lvalue '-=' assignment | lvalue '*=' assignment |
+             lvalue '/=' assignment | lvalue '%=' assignment | logicor
+lvalue = '*' lvalue | indirection
 logicor = logicand ('||' logicand)*
 logicand = eqcomp ('&&' eqcomp)*
 eqcomp = ordcomp ('==' ordcomp)* | ordcomp ('!=' orcomp)*
 ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' addition)* | addition ('>=' addition)*
 addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
-multiplication = uneg ('*' uneg)* | uneg ('/' uneg)* | uneg ('%' uneg)*
-uneg = '-' baseexpr | baseexpr
-baseexpr = identifier '(' arglist ')' | identifier | constant | '(' expression ')'
+multiplication = unary ('*' unary)* | unary ('/' unary)* | unary ('%' unary)*
+unary = '-' unary | '!' unary | '&' unary | '*' unary | indirection
+indirection = identifier '(' arglist ')' ('[' expression ']')* | baseexpr ('[' expression ']')*
+baseexpr = identifier | constant | '(' expression ')'
 arglist = expression (',' expression)* | ε
 
-
-
-type = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
+type = basictype qualifier
+qualifier = '*'* '[' constant ']'*
+basictype = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
 constant = 'true' | 'false' | number
 number = -?[0-9]+\.[0-9]*
 identifier = [A-Za-z][A-Za-z0-9_]*
-
-
-
-operator precedence (low to high):
-=
-+= -=
-*= /= %=
-||
-&&
-== !=
-< <=
-> >=
-+ -
-* / %
-- (unary negate)
-() (function call)
-
-
-
