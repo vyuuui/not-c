@@ -12,6 +12,7 @@
 #include <vector>
 #include <optional>
 #include <regex>
+#include <stdexcept>
 
 constexpr size_t kPrimitiveMaxSize = 8;
 
@@ -32,6 +33,11 @@ void trim_whitespace(std::string& str) {
     } else {
         str = str.substr(left, right - left + 1);
     }
+}
+
+void getline_trim(std::ifstream& stream, std::string& out) {
+    std::getline(stream, out);
+    trim_whitespace(out);
 }
 
 class ProgramStack {
@@ -161,10 +167,12 @@ struct CpuContext {
 class Operand {
 public:
     Operand(BaseType type) : type(type) {}
+
     template <typename T>
     void set(T t) {
         set_generic(static_cast<void*>(&t), std::min(base_type_size(type), sizeof(t)));
     }
+
     template <typename T>
     T get() {
         T t = {};
@@ -178,6 +186,7 @@ public:
 
     virtual void set_generic(void* value, size_t size) = 0;
     virtual void* get_generic() = 0;
+    virtual ~Operand() {}
 
 private:
     BaseType type;
@@ -197,6 +206,7 @@ public:
         const uint64_t frame_base = ctx.current_sub_base;
         return ctx.stack.get_stack_var(frame_base + var_stack_offset);
     }
+    virtual ~VarOperand() {}
 
 private:
     uint64_t var_stack_offset;
@@ -208,13 +218,15 @@ public:
         : Operand(type), var_stack_offset(var_stack_offset) {}
 
     void set_generic(void* value, size_t size) override {
-        throw "Can't set a variable reference";
+        throw std::runtime_error("Can't set a variable reference");
     }
     
     void* get_generic() override {
         var_net_offset = ctx.current_sub_base + var_stack_offset;
         return &var_net_offset;
     }
+
+    virtual ~VarRefOperand() {}
 
 private:
     uint64_t var_stack_offset;
@@ -250,6 +262,8 @@ public:
         }
     }
 
+    virtual ~MemoryOperand() {}
+
 private:
     bool is_ref;
     uint64_t var_stack_offset;
@@ -258,17 +272,21 @@ private:
 
 class LabelOperand : public Operand {
 public:
-    LabelOperand(std::string name) : Operand(BaseType::Int64), label_name(name) {
-    }
+    LabelOperand(std::string name) : Operand(BaseType::Int64), label_name(name) {}
+
     void set_generic(void* value, size_t size) override {
-        throw "Can't set a label!!!!\n";
+        throw std::runtime_error("Attempted set on LabelOperand");
     }
+
     void* get_generic() override {
         return &ctx.label_map[label_name];
     }
+
     const std::string get_name() {
         return label_name;
     }
+
+    virtual ~LabelOperand() {}
 
 private:
     std::string label_name;
@@ -279,12 +297,16 @@ public:
     ImmediateOperand(BaseType base_type, void* input_value) : Operand(base_type) {
         std::memcpy(static_cast<void*>(value), input_value, base_type_size(base_type));
     }
+
     void set_generic(void* value, size_t size) override {
-        throw "Can't set an immediate!!!!\n";
+        throw std::runtime_error("Attempted set on ImmediateOperand");
     }
+
     void* get_generic() override {
         return static_cast<void*>(value);
     }
+
+    virtual ~ImmediateOperand() {}
 
 private:
     uint8_t value[kPrimitiveMaxSize];
@@ -293,6 +315,7 @@ private:
 class Instruction {
 public:
     Instruction(std::vector<Operand*> ops, BaseType op_cast = BaseType::Void) : op_cast(op_cast), operands(ops) {}
+
     virtual void execute(CpuContext& ctx) = 0;
 
     virtual ~Instruction() {
@@ -300,6 +323,7 @@ public:
             delete operand;
         }
     }
+
 protected:
     std::vector<Operand*> operands;
     BaseType op_cast;
@@ -310,6 +334,8 @@ public:
     using Instruction::Instruction;
 
     void execute(CpuContext& ctx) override {}
+
+    virtual ~NopInstruction() {}
 };
 
 class MovInstruction : public Instruction {
@@ -339,8 +365,12 @@ public:
             case BaseType::Int8:
                 dest->set<int8_t>(src->get<int8_t>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in mov");
         }
     }
+
+    virtual ~MovInstruction() {}
 };
 
 class AddInstruction : public Instruction {
@@ -357,7 +387,7 @@ public:
         }
         if (is_integral(dest->get_type()) != is_integral(src1->get_type()) ||
            (is_integral(dest->get_type()) != is_integral(src2->get_type()))) {
-            throw "Fufk";
+            throw std::runtime_error("Add called with mismatched types");
         }
         switch (cast_type) {
             case BaseType::Float:
@@ -375,8 +405,12 @@ public:
             case BaseType::Int8:
                 dest->set<uint64_t>(src1->get<int8_t>() + src2->get<int8_t>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in add");
         }
     }
+
+    virtual ~AddInstruction() {}
 };
 
 class SubInstruction : public Instruction {
@@ -393,7 +427,7 @@ public:
         }
         if (is_integral(dest->get_type()) != is_integral(src1->get_type()) ||
            (is_integral(dest->get_type()) != is_integral(src2->get_type()))) {
-            throw "Fufk";
+            throw std::runtime_error("Sub called with mismatched types");
         }
         switch (cast_type) {
             case BaseType::Float:
@@ -411,8 +445,12 @@ public:
             case BaseType::Int8:
                 dest->set<uint64_t>(src1->get<int8_t>() - src2->get<int8_t>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in sub");
         }
     }
+
+    virtual ~SubInstruction() {}
 };
 
 class MulInstruction : public Instruction {
@@ -429,7 +467,7 @@ public:
         }
         if (is_integral(dest->get_type()) != is_integral(src1->get_type()) ||
            (is_integral(dest->get_type()) != is_integral(src2->get_type()))) {
-            throw "Fufk";
+            throw std::runtime_error("Mul called with mismatched types");
         }
         switch (cast_type) {
             case BaseType::Float:
@@ -447,8 +485,12 @@ public:
             case BaseType::Int8:
                 dest->set<uint64_t>(src1->get<int8_t>() * src2->get<int8_t>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in mul");
         }
     }
+
+    virtual ~MulInstruction() {}
 };
 
 class DivInstruction : public Instruction {
@@ -465,7 +507,7 @@ public:
         }
         if (is_integral(dest->get_type()) != is_integral(src1->get_type()) ||
            (is_integral(dest->get_type()) != is_integral(src2->get_type()))) {
-            throw "Fufk";
+            throw std::runtime_error("Div called with mismatched types");
         }
         switch (cast_type) {
             case BaseType::Float:
@@ -483,8 +525,12 @@ public:
             case BaseType::Int8:
                 dest->set<uint64_t>(src1->get<int8_t>() / src2->get<int8_t>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in div");
         }
     }
+
+    virtual ~DivInstruction() {}
 };
 
 class ModInstruction : public Instruction {
@@ -501,7 +547,7 @@ public:
         }
         if (is_integral(dest->get_type()) != is_integral(src1->get_type()) ||
            (is_integral(dest->get_type()) != is_integral(src2->get_type()))) {
-            throw "Fufk";
+            throw std::runtime_error("Mod called with mismatched types");
         }
         switch (cast_type) {
             case BaseType::Float:
@@ -518,8 +564,12 @@ public:
             case BaseType::Int8:
                 dest->set<uint64_t>(src1->get<int8_t>() % src2->get<int8_t>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in mod");
         }
     }
+
+    virtual ~ModInstruction() {}
 };
 
 class CmpInstruction : public Instruction {
@@ -534,7 +584,7 @@ public:
             cast_type = op_cast;
         }
         if (!is_integral(src1->get_type()) || !is_integral(src2->get_type())) {
-            throw "cmp with float not soup\n";
+            throw std::runtime_error("Non-integral cmp not allowed");
         }
         switch (cast_type) {
             case BaseType::Int64: {
@@ -593,9 +643,12 @@ public:
                 }
                 break;
             }
-            break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in cmp");
         }
     }
+
+    virtual ~CmpInstruction() {}
 };
 
 enum class JmpCondition {
@@ -609,7 +662,7 @@ public:
     void execute(CpuContext& ctx) override {
         auto dest = operands[0];
         if (dest->get_type() != BaseType::Int64) {
-            throw "Fuck";
+            throw std::runtime_error("Jump destination operand was not of expected type");
         }
         switch (condition) {
         case JmpCondition::None:
@@ -647,52 +700,53 @@ public:
             break;
         }
     }
+
+    virtual ~JmpInstruction() {}
+
 private:
     JmpCondition condition;
 };
 
-class Param : public Instruction {
+class ParamInstruction : public Instruction {
 public:
     using Instruction::Instruction;
     
     void execute(CpuContext& ctx) override {
         auto dest = operands[0];
         switch (op_cast) {
-            case BaseType::Float:
-                {
-                    float val = dest->get<float>();
-                    ctx.stack.push_stack_var(&val, sizeof(val));
-                }
+            case BaseType::Float: {
+                float val = dest->get<float>();
+                ctx.stack.push_stack_var(&val, sizeof(val));
                 break;
-            case BaseType::Int64:
-                {
-                    int64_t val = dest->get<int64_t>();
-                    ctx.stack.push_stack_var(&val, sizeof(val));
-                }
+            }
+            case BaseType::Int64: {
+                int64_t val = dest->get<int64_t>();
+                ctx.stack.push_stack_var(&val, sizeof(val));
                 break;
-            case BaseType::Int32:
-                {
-                    int32_t val = dest->get<int32_t>();
-                    ctx.stack.push_stack_var(&val, sizeof(val));
-                }
+            }
+            case BaseType::Int32: {
+                int32_t val = dest->get<int32_t>();
+                ctx.stack.push_stack_var(&val, sizeof(val));
                 break;
-            case BaseType::Int16:
-                {
-                    int16_t val = dest->get<int16_t>();
-                    ctx.stack.push_stack_var(&val, sizeof(val));
-                }
+            }
+            case BaseType::Int16: {
+                int16_t val = dest->get<int16_t>();
+                ctx.stack.push_stack_var(&val, sizeof(val));
                 break;
-            case BaseType::Int8:
-                {
-                    int8_t val = dest->get<int8_t>();
-                    ctx.stack.push_stack_var(&val, sizeof(val));
-                }
+            }
+            case BaseType::Int8: {
+                int8_t val = dest->get<int8_t>();
+                ctx.stack.push_stack_var(&val, sizeof(val));
                 break;
+            }
+            default:
+                throw std::runtime_error("Unexpected op_cast in param");
         }
     }
+    virtual ~ParamInstruction() {}
 };
 
-class Call : public Instruction {
+class CallInstruction : public Instruction {
 public:
     using Instruction::Instruction;
     
@@ -700,8 +754,7 @@ public:
         auto dest = reinterpret_cast<LabelOperand*>(operands[0]);
         auto it = ctx.subroutine_map.find(dest->get_name());
         if (it == ctx.subroutine_map.end()) {
-            std::string* msg = new std::string(std::string("Invalid subroutine name \"") + dest->get_name() + "\"");
-            throw msg->c_str();
+            throw std::runtime_error("Invalid subroutine name \"" + dest->get_name() + "\"");
         }
         auto called_subroutine = &it->second;
         ctx.call_stack.push(SubroutineRetInfo {
@@ -715,9 +768,11 @@ public:
         ctx.current_sub = called_subroutine;
         ctx.program_counter = dest->get<uint64_t>();
     }
+
+    virtual ~CallInstruction() {}
 };
 
-class Return : public Instruction {
+class ReturnInstruction : public Instruction {
 public:
     using Instruction::Instruction;
 
@@ -739,11 +794,13 @@ public:
         }
         ctx.program_counter = ret_info.return_address;
     }
+
+    virtual ~ReturnInstruction() {}
 };
 
-class ArrayCopy : public Instruction {
+class ArrayCopyInstruction : public Instruction {
 public:
-    ArrayCopy(size_t count, std::vector<Operand*> ops, BaseType op_cast = BaseType::Void)
+    ArrayCopyInstruction(size_t count, std::vector<Operand*> ops, BaseType op_cast = BaseType::Void)
         : copy_count(count), Instruction(ops, op_cast) {}
 
     void execute(CpuContext& ctx) override {
@@ -751,7 +808,7 @@ public:
         auto src = operands[1];
         if (src->get_type() != BaseType::Int64 ||
             dest->get_type() != BaseType::Int64) {
-            throw "bad";
+            throw std::runtime_error("arraycopy called with non-pointer operands");
         }
         void* read_base = ctx.stack.get_stack_var(src->get<int64_t>());
         uint64_t write_addr = dest->get<int64_t>();
@@ -760,11 +817,13 @@ public:
         }
     }
 
+    virtual ~ArrayCopyInstruction() {}
+
 private:
     size_t copy_count;
 };
 
-class IntToFloat : public Instruction {
+class IntToFloatInstruction : public Instruction {
 public:
     using Instruction::Instruction;
 
@@ -772,11 +831,11 @@ public:
         auto dest = operands[0];
         auto src = operands[1];
         if (dest->get_type() != BaseType::Float) {
-            throw "bad";
+            throw std::runtime_error("IntToFloatInstruction destination was not of type float");
         }
         switch (src->get_type()) {
             case BaseType::Float:
-                throw "bad";
+                throw std::runtime_error("IntToFloatInstruction source was of type float");
             case BaseType::Int64:
                 dest->set<double>(src->get<int64_t>());
                 break;
@@ -789,11 +848,15 @@ public:
             case BaseType::Int8:
                 dest->set<double>(src->get<int8_t>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in inttofloat");
         }
     }
+
+    virtual ~IntToFloatInstruction() {}
 };
 
-class FloatToInt : public Instruction {
+class FloatToIntInstruction : public Instruction {
 public:
     using Instruction::Instruction;
 
@@ -801,11 +864,11 @@ public:
         auto dest = operands[0];
         auto src = operands[1];
         if (src->get_type() != BaseType::Float) {
-            throw "bad";
+            throw std::runtime_error("FloatToIntInstruction source was not of type float");
         }
         switch (dest->get_type()) {
             case BaseType::Float:
-                throw "bad";
+                throw std::runtime_error("FloatToIntInstruction dest was of type float");
             case BaseType::Int64:
                 dest->set<int64_t>(src->get<float>());
                 break;
@@ -818,8 +881,42 @@ public:
             case BaseType::Int8:
                 dest->set<int8_t>(src->get<float>());
                 break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in floattoint");
         }
     }
+
+    virtual ~FloatToIntInstruction() {}
+};
+
+class PrintInstruction : public Instruction {
+public:
+    using Instruction::Instruction;
+
+    void execute(CpuContext& ctx) override {
+        auto src = operands[0];
+        switch (src->get_type()) {
+            case BaseType::Float:
+                std::cout << src->get<float>() << std::endl;
+                break;
+            case BaseType::Int64:
+                std::cout << src->get<int64_t>() << std::endl;
+                break;
+            case BaseType::Int32:
+                std::cout << static_cast<int32_t>(src->get<int32_t>()) << std::endl;
+                break;
+            case BaseType::Int16:
+                std::cout << static_cast<int32_t>(src->get<int16_t>()) << std::endl;
+                break;
+            case BaseType::Int8:
+                std::cout << static_cast<int32_t>(src->get<int8_t>()) << std::endl;
+                break;
+            default:
+                throw std::runtime_error("Unexpected cast_type in print");
+        }
+    }
+
+    virtual ~PrintInstruction() {}
 };
 
 Operand* parse_destop(std::string& op, SubroutineInfo const& current_sub) {
@@ -1011,7 +1108,7 @@ Instruction* parse_call(std::string const& args, SubroutineInfo const& current_s
     if (label == nullptr || dest == nullptr) {
         return nullptr;
     }
-    return new Call({label, dest});
+    return new CallInstruction({label, dest});
 }
 
 Instruction* parse_param(std::string const& args, SubroutineInfo const& current_sub) {
@@ -1027,7 +1124,7 @@ Instruction* parse_param(std::string const& args, SubroutineInfo const& current_
         return nullptr;
     }
     BaseType type = type_from_string(matches[1]);
-    return new Param({srcop}, type);
+    return new ParamInstruction({srcop}, type);
 }
 
 Instruction* parse_return(std::string const& args, SubroutineInfo const& current_sub) {
@@ -1037,12 +1134,12 @@ Instruction* parse_return(std::string const& args, SubroutineInfo const& current
     Operand* srcop = parse_srcop(op, current_sub);
     if (srcop == nullptr) {
         if (std::regex_match(args, empty_re)) {
-            return new Return(std::vector<Operand*>{});
+            return new ReturnInstruction(std::vector<Operand*>{});
         } else {
             return nullptr;
         }
     }
-    return new Return({srcop});
+    return new ReturnInstruction({srcop});
 }
 
 Instruction* parse_arraycopy(std::string const& args, SubroutineInfo const& current_sub) {
@@ -1054,7 +1151,7 @@ Instruction* parse_arraycopy(std::string const& args, SubroutineInfo const& curr
     if (des == nullptr || srcop == nullptr) {
         return nullptr;
     }
-    return new ArrayCopy(size, {des, srcop});
+    return new ArrayCopyInstruction(size, {des, srcop});
 }
 
 Instruction* parse_inttofloat(std::string const& args, SubroutineInfo const& current_sub) {
@@ -1065,7 +1162,7 @@ Instruction* parse_inttofloat(std::string const& args, SubroutineInfo const& cur
     if (des == nullptr || srcop == nullptr) {
         return nullptr;
     }
-    return new IntToFloat({des, srcop});
+    return new IntToFloatInstruction({des, srcop});
 }
 
 Instruction* parse_floattoint(std::string const& args, SubroutineInfo const& current_sub) {
@@ -1076,12 +1173,22 @@ Instruction* parse_floattoint(std::string const& args, SubroutineInfo const& cur
     if (des == nullptr || srcop == nullptr) {
         return nullptr;
     }
-    return new FloatToInt({des, srcop});
+    return new FloatToIntInstruction({des, srcop});
+}
+
+Instruction* parse_print(std::string const& args, SubroutineInfo const& current_sub) {
+    std::string op = args;
+    Operand* srcop = parse_srcop(op, current_sub);
+
+    if (srcop == nullptr) {
+        return nullptr;
+    }
+    return new PrintInstruction({srcop});
 }
 
 Instruction* parse_instruction(std::string line, size_t instruction_address, SubroutineInfo const& current_sub) {
     Instruction* instr = nullptr;
-    std::regex optype("^\\s*(mov|add|sub|mul|div|mod|cmp|jmp|je|jne|jgt|jlt|jge|jle|param|label|call|return|arraycopy|inttofloat|floattoint)\\s*(.*)$");
+    std::regex optype("^\\s*(mov|add|sub|mul|div|mod|cmp|jmp|je|jne|jgt|jlt|jge|jle|param|label|call|return|arraycopy|inttofloat|floattoint|print)\\s*(.*)$");
     std::smatch matches;
     if (!std::regex_match(line, matches, optype)) {
         return nullptr;
@@ -1128,6 +1235,8 @@ Instruction* parse_instruction(std::string line, size_t instruction_address, Sub
         instr = parse_inttofloat(rest, current_sub);
     } else if (name == "floattoint") {
         instr = parse_floattoint(rest, current_sub);
+    } else if (name == "print") {
+        instr = parse_print(rest, current_sub);
     }
     return instr;
 }
@@ -1155,7 +1264,7 @@ std::optional<VariableInfo> parse_frame_variable(std::string line) {
     std::string arr_count = re_results[4];
     if (!arr_count.empty()) {
         if (vi.storage_type == StorageType::Parameter) {
-            throw "Parameters are not allowed to be arrays";
+            throw std::runtime_error("Parameters are not allowed to be arrays");
         }
         vi.count = strtoll(arr_count.c_str(), nullptr, 10);
     }
@@ -1167,11 +1276,11 @@ std::optional<std::unordered_map<std::string, VariableInfo>>
 parse_frame_description(std::ifstream& file) {
     std::unordered_map<std::string, VariableInfo> map;
     std::string line;
-    for (std::getline(file, line);
-         line.find(".endframe") == std::string::npos;
-         std::getline(file, line)) {
+    for (getline_trim(file, line);
+         line != ".endframe";
+         getline_trim(file, line)) {
         if (file.eof()) {
-            throw "Unexpected EOF in parse_frame_description";
+            throw std::runtime_error("Unexpected EOF in parse_frame_description");
         }
         if (line.empty()) {
             continue;
@@ -1191,13 +1300,13 @@ std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<
         if (file.eof()) {
             return std::nullopt;
         }
-        std::getline(file, line);
+        getline_trim(file, line);
     }
 
     std::regex re("^\\s*.sub\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s*$");
     std::smatch matches;
     if (!std::regex_match(line, matches, re)) {
-        return std::nullopt;
+        throw std::runtime_error("Unexpected line \"" + line + "\" when \".sub\" was expected");
     }
 
     SubroutineInfo si;
@@ -1230,11 +1339,11 @@ std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<
     si.variable_map = std::move(*frame_vars);
 
     // parse instructions
-    for (std::getline(file, line);
-         line.find(".endsub") == std::string::npos;
-         std::getline(file, line)) {
+    for (getline_trim(file, line);
+        line.find(".endsub") == std::string::npos;
+        getline_trim(file, line)) {
         if (file.eof()) {
-            throw "Unexpected EOF in parse_subroutine";
+            throw std::runtime_error("Unexpected EOF in parse_subroutine");
         }
 
         trim_whitespace(line);
@@ -1248,8 +1357,7 @@ std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<
         } else {
             Instruction* inst = parse_instruction(line, program.size(), si);
             if (inst == nullptr) {
-                std::string* err = new std::string(std::string("Failed to parse line: ") + line);
-                throw err->c_str();
+                throw std::runtime_error("Failed to parse line: " + line);
             }
             program.push_back(inst);
         }
@@ -1258,9 +1366,18 @@ std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<
     return si;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        std::cerr << "Invalid arguments\nUsage: ./interp <asm file>\n";
+        return 1;
+    }
+
     std::ifstream asm_file;
-    asm_file.open("test.asm");
+    asm_file.open(argv[1]);
+    if (!asm_file.is_open()) {
+        std::cerr << "File \"" << argv[1] << "\" not found\n";
+        return 1;
+    }
     std::string line;
     std::vector<Instruction*> program;
 
@@ -1270,6 +1387,9 @@ int main() {
             ctx.subroutine_map[subroutine->subroutine_name] = subroutine.value();
             subroutine = parse_subroutine(asm_file, program);
         }
+        if (ctx.subroutine_map.find("main") == ctx.subroutine_map.end()) {
+            throw std::runtime_error("Failed to find entrypoint, should be main");
+        }
 
         ctx.current_sub_base = 8;
         VarOperand program_ret(BaseType::Int64, 0);
@@ -1278,7 +1398,7 @@ int main() {
             .params_size = 0,
         };
         ctx.stack.change_size(8);
-        ctx.call_stack.push(SubroutineRetInfo{
+        ctx.call_stack.push(SubroutineRetInfo {
             .return_address = program.size(),
             .return_store = &program_ret,
             .return_sub = &main_call,
@@ -1292,8 +1412,9 @@ int main() {
             ctx.program_counter++;
         }
         std::cout << "Done, returned " << program_ret.get<int64_t>() << std::endl;
-    } catch (const char* err) {
-        std::cout << "Error: " << err << std::endl;
+    } catch (std::runtime_error e) {
+        std::cerr << "Failed. Reason: " << e.what() << std::endl;
+        return 1;
     }
     return 0;
 }
