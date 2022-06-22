@@ -28,6 +28,8 @@ data SyntaxNode
     | IfNode SyntaxNode SyntaxNode 
     | IfElseNode SyntaxNode SyntaxNode SyntaxNode
     | ReturnNode SyntaxNode
+    | ContinueNode
+    | BreakNode
     -- Decl
     | DeclarationNode DataType String
     | DefinitionNode DataType String SyntaxNode
@@ -258,6 +260,10 @@ isReturn :: Token -> Bool
 isReturn = controlMatches "return"
 isEmpty :: Token -> Bool
 isEmpty = punctuationMatches ";"
+isContinue :: Token -> Bool 
+isContinue = controlMatches "continue"
+isBreak :: Token -> Bool 
+isBreak = controlMatches "break"
 
 parseStatement :: ParseState SyntaxNode
 parseStatement = peekToken >>= parseStatementLookahead
@@ -282,6 +288,14 @@ parseStatement = peekToken >>= parseStatementLookahead
         | isEmpty lookahead       = do
             eatPunctuation ";"
             return EmptyNode
+        | isContinue lookahead    = do
+            eatControl "continue"
+            eatPunctuation ";"
+            return ContinueNode
+        | isBreak lookahead    = do
+            eatControl "break"
+            eatPunctuation ";"
+            return BreakNode
         | otherwise               = raiseFailure
 
 parseCondition :: ParseState SyntaxNode
@@ -615,7 +629,7 @@ prog = function+
 function = type identifier '(' paramlist ')' block
 paramlist = type identifier (',' type identifier)* | ε
 block = '{' stmt* '}'
-stmt = declaration ';' | block | expression ';' | conditional | loop | ret ';'
+stmt = declaration ';' | block | expression ';' | conditional | loop | ret ';' | 'continue' ';' | 'break' ';'
 declaration = type identifier optassign
 optassign = '=' expression | ε
 loop = 'while' '(' expression ')' block
@@ -638,6 +652,10 @@ indirection = identifier '(' arglist ')' ('[' expression ']')* | baseexpr ('[' e
 baseexpr = identifier | constant | '(' expression ')'
 arglist = expression (',' expression)* | ε
 
+while (i > 3) {
+    i++;
+    continue;
+}
 
 
 type = basictype qualifier

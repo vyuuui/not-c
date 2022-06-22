@@ -107,7 +107,7 @@ isNumber :: Char -> Bool
 isNumber h = C.isDigit h || h == '.'
 
 control :: S.Set String
-control = S.fromList ["if", "else", "for", "while", "return"]
+control = S.fromList ["if", "else", "for", "while", "return", "break", "continue"]
 
 punctuation :: S.Set String
 punctuation = S.fromList ["(", ")", "{", "}", ",", ";", "[", "]"]

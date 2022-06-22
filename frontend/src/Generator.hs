@@ -12,18 +12,17 @@ import Lexer
 import Debug.Trace
 
 data VarInfo = FunctionVar DataType [(DataType, String)] | PrimitiveVar DataType
-data Environment = EnvLink (M.Map String VarInfo) Environment | EnvBase (M.Map String VarInfo)
-
--- Check variable existence upon reference
---  - Add declared variables & functions to environment as they are added
--- Check functions take the correct number of parameters and type
-
---reduceTypes :: (String, String) -> String
---reduceTypes (left, right) = 
+data Environment = EnvLink Bool (M.Map String VarInfo) Environment | EnvBase (M.Map String VarInfo)
 
 insertIntoEnv :: Environment -> String -> VarInfo -> Environment
-insertIntoEnv (EnvLink envMap next) varName varInfo = EnvLink (M.insert varName varInfo envMap) next
+insertIntoEnv (EnvLink loop envMap next) varName varInfo = EnvLink loop (M.insert varName varInfo envMap) next
 insertIntoEnv (EnvBase envMap) varName varInfo = EnvBase (M.insert varName varInfo envMap)
+
+isInLoop :: Environment -> Bool
+isInLoop (EnvLink loop _ next) 
+  | loop      = True
+  | otherwise = isInLoop next
+isInLoop (EnvBase _) = False
 
 validateProgram :: Program -> Bool
 validateProgram program = let baseEnv = EnvBase (foldl addFunctionToEnvironment M.empty program) in
@@ -168,16 +167,18 @@ validateSyntaxNode statement env = case statement of
             validateSyntaxNode right modifiedEnv
         else
             (env, False)
+    ContinueNode -> (env, isInLoop env)
+    BreakNode -> (env, isInLoop env)
     WhileNode condition block -> (env, snd (validateSyntaxNode condition env)
                                        && isImplicitCastAllowed (decltype condition env) ("bool", [])
-                                       && snd (validateSyntaxNode block $ EnvLink M.empty env))
+                                       && snd (validateSyntaxNode block $ EnvLink True M.empty env))
     IfNode condition block -> (env, snd (validateSyntaxNode condition env)
                                     && isImplicitCastAllowed (decltype condition env) ("bool", [])
-                                    && snd (validateSyntaxNode block $ EnvLink M.empty env))
+                                    && snd (validateSyntaxNode block $ EnvLink False M.empty env))
     IfElseNode condition block elseBlock -> (env, snd (validateSyntaxNode condition env)
                                                   && isImplicitCastAllowed (decltype condition env) ("bool", [])
-                                                  && snd (validateSyntaxNode block $ EnvLink M.empty env)
-                                                  && snd (validateSyntaxNode elseBlock $ EnvLink M.empty env))
+                                                  && snd (validateSyntaxNode block $ EnvLink False M.empty env)
+                                                  && snd (validateSyntaxNode elseBlock $ EnvLink False M.empty env))
     ReturnNode expr -> let Just (FunctionVar currentFunctionRetType _) = lookupVar "$currentFunction" env in
         (env, snd (validateSyntaxNode expr env)
               && isImplicitCastAllowed (decltype expr env) currentFunctionRetType)
@@ -197,7 +198,7 @@ validateSyntaxNode statement env = case statement of
     EmptyNode -> (env, True)
 
 lookupVar :: String -> Environment -> Maybe VarInfo
-lookupVar varName (EnvLink map nextEnv) =
+lookupVar varName (EnvLink _ map nextEnv) =
     if M.member varName map
     then M.lookup varName map
     else lookupVar varName nextEnv
