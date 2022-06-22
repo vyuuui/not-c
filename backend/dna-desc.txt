@@ -1,0 +1,69 @@
+DefinitelyNotAsm IR description:
+Low-level IR to be given to the final code generator
+- linear memory layout (stack + readonly global constants)
+- explicit casts
+- emits compiler-library calls for some tasks (global-constant array templates to local arrays, int/float casting)
+- non-primitive constants must be declared explicitly outside of function
+- primitive constants allowed in immediate form
+
+--------------------------------
+IR format:
+<IR file> = <subroutine>*
+            <global constants>*
+<subroutine> = <subroutine declaration>
+               <frame description>
+               <subroutine body>
+               <subroutine terminator>
+<subroutine declaration> = '.sub' name
+<frame description> = <frame vars list>*
+                      '.endframe'
+<frame vars list> = ('in' | 'local' | 'temp') name type count
+<subroutine terminator> = '.endsub'
+<subroutine body> = <instruction>* | '.label' name
+<global constants> = '.array' name type
+                     comma separated values
+                     '.endarray'
+types: int8 int16 int32 int64 float
+type form: typename
+
+--------------------------------
+Instruction format (fills for <instruction>)
+Operand forms:
+    <destop> = <variable> | <memref>
+    <srcop> = &?<variable> | <memref> | <constant>
+    <variable> = <varname>
+    <memref> = [&?<varname> (+ offset)?]::<type>  // note: offset should be treated as a raw byte offset!
+    <constant> = integral::<inttype> | floating::<floattype> | global-constant | label
+    <type> = <inttype> | <floattype>
+    <inttype> = int8 | int16 | int32 | int64
+    <floattype> = float
+
+Operand type rules:
+    - Constants and memrefs are typed explicitly
+    - Memref dereferencing must be int64
+    - Referenced variables give a type of int64
+    - Mismatched type groups (integral/float) will cause failure for math ops
+
+opcodes:
+    copying:
+        mov <destop> <srcop>
+    math:
+        add <destop> <srcop> <srcop>
+        sub <destop> <srcop> <srcop>
+        mul <destop> <srcop> <srcop>
+        div <destop> <srcop> <srcop>
+        mod <destop> <srcop> <srcop>
+    control flow:
+        cmp <srcop> <srcop>
+        jmp label
+        jc label  // (c=e | ne | gt | lt | ge | le)
+    function control flow:
+        param <srcop>
+        call label <destop>  // label must be a subroutine
+        return <srcop>
+        return  // for void return type
+    compiler-library:
+        arraycopy <destop> <srcop> size  // size is specified in bytes
+        inttofloat <destop> <srcop>
+        floattoint <destop> <srcop>
+        print <srcop>  // Should be ignored by the code generator
