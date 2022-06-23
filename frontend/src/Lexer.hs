@@ -120,16 +120,18 @@ types = S.fromList ["void", "char", "short", "int", "long", "float", "bool"]
 
 
 lexStringSingle :: String -> LexerResult
-lexStringSingle (h:t)
-    | isOperatorChar h    = lexOperator (h:t)
-    | isPunctuationChar h = (Punctuation [h], t)
-    | C.isDigit h         = let (token, rest) = span Lexer.isNumber t
-                            in (classifyNumberToken (h:token), rest)
-    | isLetterChar h      = let (token, rest) = span isIdentifierChar t
-                            in (classifyLetterToken (h:token), rest)
-    | C.isSpace h         = lexStringSingle $ eatWs t
-    | h == '"'            = lexStringConstant t
-    | otherwise           = (Invalid, t)
+lexStringSingle (h1:h2:t)
+    | h1 == '/' && h2 == '/' = lexStringSingle (tail $ dropWhile (/='\n') t)
+    | h1 == '/' && h2 == '*' = lexStringSingle $ findCommentEnd t
+    | isOperatorChar h1    = lexOperator (h1:h2:t)
+    | isPunctuationChar h1 = (Punctuation [h1], h2:t)
+    | C.isDigit h1         = let (token, rest) = span Lexer.isNumber (h2:t)
+                            in (classifyNumberToken (h1:token), rest)
+    | isLetterChar h1      = let (token, rest) = span isIdentifierChar (h2:t)
+                            in (classifyLetterToken (h1:token), rest)
+    | C.isSpace h1         = lexStringSingle $ eatWs (h2:t)
+    | h1 == '"'            = lexStringConstant (h2:t)
+    | otherwise           = (Invalid, h2:t)
   where
     lexStringConstant :: String -> LexerResult
     lexStringConstant str
@@ -171,6 +173,10 @@ lexStringSingle (h:t)
           where
             newCur = cur ++ [head rest]
         (end, longestMatch, rest) = until checkStop stepLex ("", "", str)
+    findCommentEnd :: String -> String
+    findCommentEnd (h1:h2:t)
+      | h1 == '*' && h2 == '/' = t
+      | otherwise              = findCommentEnd (h2:t)
 
 lexString :: String -> [Token]
 lexString str = fst (until (\(_, rest) -> rest == "")

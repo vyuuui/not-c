@@ -13,11 +13,13 @@ short main() {
     int* y = &x;
     int** z = &y;
     a[0] = y;
-
     while (y == *z) {
         test(*(z+x)) == false;
     }
-    z[x];
-    1 + 2;
-    return x;
+    for (;;) {
+        
+    }
+    for (int q; ; q += 1) {
+        q = 30;
+    }
 }

@@ -25,6 +25,7 @@ data SyntaxNode
     | SeqNode SyntaxNode SyntaxNode
     -- Control
     | WhileNode SyntaxNode SyntaxNode
+    | ForNode SyntaxNode SyntaxNode SyntaxNode SyntaxNode
     | IfNode SyntaxNode SyntaxNode 
     | IfElseNode SyntaxNode SyntaxNode SyntaxNode
     | ReturnNode SyntaxNode
@@ -254,8 +255,10 @@ isLvalue :: Token -> Bool
 isLvalue tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(", punctuationMatches "*" ]
 isConditional :: Token -> Bool
 isConditional = controlMatches "if"
-isLoop :: Token -> Bool
-isLoop = controlMatches "while"
+isWhileLoop :: Token -> Bool
+isWhileLoop = controlMatches "while"
+isForLoop :: Token -> Bool
+isForLoop = controlMatches "for"
 isReturn :: Token -> Bool
 isReturn = controlMatches "return"
 isEmpty :: Token -> Bool
@@ -280,7 +283,8 @@ parseStatement = peekToken >>= parseStatementLookahead
             eatPunctuation ";"
             return node
         | isConditional lookahead = parseCondition
-        | isLoop lookahead        = parseLoop
+        | isWhileLoop lookahead   = parseWhileLoop
+        | isForLoop lookahead     = parseForLoop
         | isReturn lookahead      = do
             node <- parseReturn
             eatPunctuation ";"
@@ -313,14 +317,47 @@ parseCondition = do
             return $ IfElseNode expressionNode block elseBlock
         else return $ IfNode expressionNode block
 
-parseLoop :: ParseState SyntaxNode
-parseLoop = do
+parseWhileLoop :: ParseState SyntaxNode
+parseWhileLoop = do
     eatControl "while"
     eatPunctuation "("
     expressionNode <- parseExpression
     eatPunctuation ")"
     block <- parseBlock
     return (WhileNode expressionNode block)
+
+parseForInit :: ParseState SyntaxNode
+parseForInit = peekToken >>= parseForInitLookahead
+  where
+    parseForInitLookahead :: Token -> ParseState SyntaxNode
+    parseForInitLookahead lookahead
+        | isDecl lookahead                 = parseDeclaration
+        | isExpression lookahead           = parseExpression
+        | punctuationMatches ";" lookahead = return EmptyNode
+        | otherwise                        = raiseFailure
+
+parseForExpr :: ParseState SyntaxNode
+parseForExpr = peekToken >>= parseForExprLookahead
+  where
+    parseForExprLookahead :: Token -> ParseState SyntaxNode
+    parseForExprLookahead lookahead
+        | isExpression lookahead           = parseExpression
+        | punctuationMatches ";" lookahead ||
+          punctuationMatches ")" lookahead = return EmptyNode
+        | otherwise                        = raiseFailure
+
+parseForLoop :: ParseState SyntaxNode
+parseForLoop = do
+    eatControl "for"
+    eatPunctuation "("
+    forInit <- parseForInit
+    eatPunctuation ";"
+    forCond <- parseForExpr
+    eatPunctuation ";"
+    forExpr <- parseForExpr
+    eatPunctuation ")"
+    block <- parseBlock
+    return $ ForNode forInit forCond forExpr block
 
 parseDeclaration :: ParseState SyntaxNode
 parseDeclaration = do
@@ -411,113 +448,28 @@ parseOpPrecedence parseAction opCombine = do
 
 parseLogicOr :: ParseState SyntaxNode
 parseLogicOr = parseOpPrecedence parseLogicAnd [("||", BinaryOpNode Or)]
-    -- do
-    -- node <- parseLogicAnd
-    -- token <- peekToken
-    -- if operatorMatches "||" token
-    -- then do
-    --     eatToken
-    --     rightNode <- parseLogicAnd
-    --     return (BinaryOpNode Or node rightNode)
-    -- else
-    --     return node
 
 parseLogicAnd :: ParseState SyntaxNode
 parseLogicAnd = parseOpPrecedence parseEqComp [("&&", BinaryOpNode And)]
-    -- do
-    -- node <- parseEqComp
-    -- token <- peekToken
-    -- if operatorMatches "&&" token
-    -- then do
-    --     eatToken
-    --     rightNode <- parseEqComp
-    --     return (BinaryOpNode And node rightNode)
-    -- else
-    --     return node
 
 parseEqComp :: ParseState SyntaxNode
 parseEqComp = parseOpPrecedence parseOrdComp [("==", BinaryOpNode Equal),
                                               ("!=", BinaryOpNode NotEqual)]
-    -- do
-    -- node <- parseOrdComp
-    -- token <- peekToken
-    -- case () of _
-    --             | operatorMatches "==" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseOrdComp
-    --                 return (BinaryOpNode Equal node rightNode)
-    --             | operatorMatches "!=" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseOrdComp
-    --                 return (BinaryOpNode NotEqual node rightNode)
-    --             | otherwise                    -> return node
 
 parseOrdComp :: ParseState SyntaxNode
 parseOrdComp = parseOpPrecedence parseAddition [(">", BinaryOpNode GreaterThan),
                                                 ("<", BinaryOpNode LessThan),
                                                 (">=", BinaryOpNode GreaterThanOrEqual),
                                                 ("<=", BinaryOpNode LessThanOrEqual)]
-    -- do
-    -- node <- parseAddition
-    -- token <- peekToken
-    -- case () of _
-    --             | operatorMatches ">" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseAddition
-    --                 return (BinaryOpNode GreaterThan node rightNode)
-    --             | operatorMatches "<" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseAddition
-    --                 return (BinaryOpNode LessThan node rightNode)
-    --             | operatorMatches ">=" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseAddition
-    --                 return (BinaryOpNode GreaterThanOrEqual node rightNode)
-    --             | operatorMatches "<=" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseAddition
-    --                 return (BinaryOpNode LessThanOrEqual node rightNode)
-    --             | otherwise                    -> return node
 
 parseAddition :: ParseState SyntaxNode
 parseAddition = parseOpPrecedence parseMultiplication [("+", BinaryOpNode Addition),
                                                        ("-", BinaryOpNode Subtraction)]
-    
-    -- do
-    -- node <- parseMultiplication
-    -- token <- peekToken
-    -- case () of _
-    --             | operatorMatches "+" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseMultiplication
-    --                 return (BinaryOpNode Addition node rightNode)
-    --             | operatorMatches "-" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseMultiplication
-    --                 return (BinaryOpNode Subtraction node rightNode)
-    --             | otherwise                    -> return node
 
 parseMultiplication :: ParseState SyntaxNode
 parseMultiplication = parseOpPrecedence parseUnary [("*", BinaryOpNode Multiplication),
                                                     ("/", BinaryOpNode Division),
                                                     ("%", BinaryOpNode Mod)]
-    -- do
-    -- node <- parseUnary
-    -- token <- peekToken
-    -- case () of _
-    --             | operatorMatches "*" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseUnary
-    --                 return (BinaryOpNode Multiplication node rightNode)
-    --             | operatorMatches "/" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseUnary
-    --                 return (BinaryOpNode Division node rightNode)
-    --             | operatorMatches "%" token -> do 
-    --                 eatToken
-    --                 rightNode <- parseUnary
-    --                 return (BinaryOpNode Mod node rightNode)
-    --             | otherwise                    -> return node
 
 parseUnary :: ParseState SyntaxNode
 parseUnary = do
@@ -629,10 +581,13 @@ prog = function+
 function = type identifier '(' paramlist ')' block
 paramlist = type identifier (',' type identifier)* | ε
 block = '{' stmt* '}'
-stmt = declaration ';' | block | expression ';' | conditional | loop | ret ';' | 'continue' ';' | 'break' ';'
+stmt = declaration ';' | block | expression ';' | conditional | forloop | whileloop | ret ';' | 'continue' ';' | 'break' ';'
 declaration = type identifier optassign
 optassign = '=' expression | ε
-loop = 'while' '(' expression ')' block
+whileloop = 'while' '(' expression ')' block
+forinit = declaration | assignment | ε
+forexpr = expression | ε
+forloop = 'for' '(' forinit ';' forexpr ';' forexpr ')' block
 conditional = 'if' '(' expression ')' block elseconditional
 elseconditional = 'else' block | ε
 ret = 'return' expression
