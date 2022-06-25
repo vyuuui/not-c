@@ -19,12 +19,12 @@ maintainer:         tyrannicanine@gmail.com
 extra-source-files: CHANGELOG.md
 
 executable definitely-not-c
-    main-is: Generator.hs
+    main-is: ParserStateful.hs
     -- main-is:          CompilerMain.hs
     ghc-options:      -dynamic
 
     -- Modules included in this executable, other than Main.
-    other-modules: Lexer, ParserStateful, Validator
+    other-modules: Lexer, CompilerShared
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:

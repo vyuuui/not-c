@@ -10,7 +10,6 @@ import Data.Maybe
 import ParserStateful
 import Lexer
 import Debug.Trace
-import System.Posix.Internals (c_ftruncate)
 
 data VarInfo = FunctionVar DataType [(DataType, String)] | PrimitiveVar DataType
 data Environment = EnvLink Bool (M.Map String VarInfo) Environment | EnvBase (M.Map String VarInfo)
@@ -194,11 +193,11 @@ validateSyntaxNode statement env = case statement of
         (env, snd (validateSyntaxNode expr env)
               && isImplicitCastAllowed (decltype expr env) currentFunctionRetType)
     DeclarationNode typeName id ->
-        if canShadow id env
+        if canShadow id env && fst typeName /= "void"
           then (insertIntoEnv env id (PrimitiveVar typeName), True)
           else (env, False)
     DefinitionNode typeName id expr ->
-        if canShadow id env
+        if canShadow id env && fst typeName /= "void"
           then (insertIntoEnv env id (PrimitiveVar typeName),
                   snd (validateSyntaxNode expr (insertIntoEnv env id (PrimitiveVar typeName)))
                   && isImplicitCastAllowed (decltype expr env) typeName)

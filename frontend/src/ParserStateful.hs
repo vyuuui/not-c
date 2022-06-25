@@ -1,127 +1,75 @@
 module ParserStateful where
 
-
 import qualified Data.Set as S
 import qualified Data.Map as M
 import qualified Data.List as L
-import Data.Maybe
+import CompilerShared
 import Control.Monad
 import Control.Monad.Loops ( iterateUntilM, whileM_, whileM, untilM )
 import Control.Monad.Trans
 import Control.Monad.Trans.State.Lazy
+import Data.Maybe
+import Debug.Trace
 import Lexer
 import System.IO
-import Debug.Trace
 
-type DataType = (String, [Int])
-type Program = [SyntaxNode]
-type ParseState = StateT ([Token], [SyntaxNode]) Maybe
+type Program = ([FunctionDefinition], [StructDefinition])
 type ParameterList = [(DataType, String)]
-
-data SyntaxNode
-    = FunctionDefinitionNode DataType String [(DataType, String)] SyntaxNode
-    | EmptyNode
-    -- Two sequential operations
-    | SeqNode SyntaxNode SyntaxNode
-    -- Control
-    | WhileNode SyntaxNode SyntaxNode
-    | ForNode SyntaxNode SyntaxNode SyntaxNode SyntaxNode
-    | IfNode SyntaxNode SyntaxNode 
-    | IfElseNode SyntaxNode SyntaxNode SyntaxNode
-    | ReturnNode SyntaxNode
-    | ContinueNode
-    | BreakNode
-    -- Decl
-    | DeclarationNode DataType String
-    | DefinitionNode DataType String SyntaxNode
-    -- Expression
-    | IdentifierNode String
-    | LiteralNode ConstantType
-    | FunctionCallNode String [SyntaxNode]
-    | ArrayIndexNode SyntaxNode SyntaxNode
-    | ParenthesisNode SyntaxNode
-    | BinaryOpNode BinaryOp SyntaxNode SyntaxNode
-    | UnaryOpNode UnaryOp SyntaxNode
-    | AssignmentNode SyntaxNode AssignmentOp SyntaxNode
-    deriving Show
-
-data BinaryOp
-    = Addition
-    | Multiplication
-    | Subtraction
-    | Division
-    | Mod
-    | Equal
-    | NotEqual
-    | LessThan
-    | GreaterThan
-    | GreaterThanOrEqual
-    | LessThanOrEqual
-    | Or
-    | And
-    deriving (Show, Eq)
-
-data AssignmentOp
-    = NoOp
-    | PlusEq
-    | MinusEq
-    | MulEq
-    | DivEq
-    | ModEq
-    deriving (Show, Eq)
-
-data UnaryOp
-    = Negate
-    | Not
-    | Reference
-    | Dereference
-    deriving (Show, Eq)
-
-
 
 loadAndParse :: String -> IO Program
 loadAndParse file = do
     handle <- openFile file ReadMode
     contents <- hGetContents handle
-    let tokens = lexString contents
-    case parseProg tokens of
+    case parseProg contents of
         Just prog -> return prog
         Nothing -> error "Bad program nat!"
 
-raiseFailure :: ParseState a
+raiseFailure :: ParseAction a
 raiseFailure = lift Nothing
 
-scanToken :: ParseState Token
+-- Lexes a new token, adding it to the LexerState
+-- Returns the newly lexed token
+lexNewToken :: ParseAction Token
+lexNewToken = do
+    ParseState (cacheTok, progStr) typeEnv funcs structs <- get
+    let (newTok, restProg) = lexStringSingle typeEnv progStr
+    put $ ParseState (cacheTok ++ [newTok], restProg) typeEnv funcs structs
+    return newTok
+
+scanToken :: ParseAction Token
 scanToken = do
-    (tokList, funcList) <- get
-    if null tokList
-      then raiseFailure
-      else do
-        put (tail tokList, funcList)
-        return $ head tokList
+    ParseState (cacheTok, progStr) typeEnv funcs structs <- get
+    case cacheTok of
+        headTok:restTok -> do
+            put $ ParseState (restTok, progStr) typeEnv funcs structs
+            return headTok
+        _               -> do
+            lexNewToken
+            state popToken
 
-eatToken :: ParseState ()
-eatToken = do
-    (tokList, funcList) <- get
-    if null tokList
-      then raiseFailure
-      else do
-        put (tail tokList, funcList)
-        return ()
+eatToken :: ParseAction ()
+eatToken = void scanToken
 
-peekToken :: ParseState Token
+peekToken :: ParseAction Token
 peekToken = do
-    (tokList, funcList) <- get
-    if null tokList
-      then raiseFailure
-      else return $ head tokList
+    ParseState (cacheTok, progStr) _ _ _ <- get
+    case cacheTok of
+        headTok:restTok -> do
+            return headTok
+        _               -> lexNewToken
 
-peekTwoToken :: ParseState (Token, Token)
+peekTwoToken :: ParseAction (Token, Token)
 peekTwoToken = do
-    (tokList, funcList) <- get
-    case tokList of
-        tok1:tok2:rest -> return (tok1, tok2)
-        _              -> raiseFailure
+    ParseState (cacheTok, progStr) _ _ _ <- get
+    case cacheTok of
+        tok1:tok2:restTok -> return (tok1, tok2)
+        [tok1]            -> do
+            tok2 <- lexNewToken
+            return (tok1, tok2)
+        _                 -> do
+            tok1 <- lexNewToken
+            tok2 <- lexNewToken
+            return (tok1, tok2)
 
 -- Helper to unwrap the String part of certain tokens
 -- error should never be hit, as below helpers should avoid invalid calls
@@ -134,70 +82,100 @@ extractInner (Punctuation s) = s
 extractInner _               = error "Invalid call"
 
 -- Generic helpers to validate a token given a predicate (and extract)
-extractStrIfValid :: (Token -> Bool) -> Token -> ParseState String
+extractStrIfValid :: (Token -> Bool) -> Token -> ParseAction String
 extractStrIfValid check token =
     if check token
       then return (extractInner token)
       else raiseFailure
-checkTokenPredicate :: (Token -> Bool) -> Token -> ParseState ()
+checkTokenPredicate :: (Token -> Bool) -> Token -> ParseAction ()
 checkTokenPredicate check token = unless (check token) raiseFailure
 
 -- Helpers to validate several tokens, raises error if validation fails
-extractTypeNameIfValid :: Token -> ParseState String
+extractTypeNameIfValid :: Token -> ParseAction String
 extractTypeNameIfValid = extractStrIfValid isTypeName
-extractIdentifierIfValid :: Token -> ParseState String
+extractIdentifierIfValid :: Token -> ParseAction String
 extractIdentifierIfValid = extractStrIfValid isIdentifier
-extractOperatorIfValid :: Token -> ParseState String
+extractOperatorIfValid :: Token -> ParseAction String
 extractOperatorIfValid = extractStrIfValid isOperator
-extractConstantIfValid :: Token -> ParseState ConstantType
+extractConstantIfValid :: Token -> ParseAction ConstantType
 extractConstantIfValid (Constant val) = return val
 extractConstantIfValid _              = raiseFailure
-validatePunctuation :: String -> Token -> ParseState ()
+validatePunctuation :: String -> Token -> ParseAction ()
 validatePunctuation val = checkTokenPredicate (punctuationMatches val)
-validateControl :: String -> Token -> ParseState ()
+validateControl :: String -> Token -> ParseAction ()
 validateControl val = checkTokenPredicate (controlMatches val)
-validateOperator :: String -> Token -> ParseState ()
+validateOperator :: String -> Token -> ParseAction ()
 validateOperator val = checkTokenPredicate (operatorMatches val)
+validateKeyword :: String -> Token -> ParseAction ()
+validateKeyword val = checkTokenPredicate (keywordMatches val)
 
 -- Helpers to consume a specific token (and extract contents for id/type)
-scanIdentifier :: ParseState String
+scanIdentifier :: ParseAction String
 scanIdentifier = scanToken >>= extractIdentifierIfValid
-scanTypeName :: ParseState String
+scanTypeName :: ParseAction String
 scanTypeName = scanToken >>= extractTypeNameIfValid
-scanOperator :: ParseState String
+scanOperator :: ParseAction String
 scanOperator = scanToken >>= extractOperatorIfValid
-scanConstant :: ParseState ConstantType
+scanConstant :: ParseAction ConstantType
 scanConstant = scanToken >>= extractConstantIfValid
-eatPunctuation :: String -> ParseState ()
+eatPunctuation :: String -> ParseAction ()
 eatPunctuation val = scanToken >>= validatePunctuation val
-eatControl :: String -> ParseState ()
+eatControl :: String -> ParseAction ()
 eatControl val = scanToken >>= validateControl val
-eatOperator :: String -> ParseState ()
+eatOperator :: String -> ParseAction ()
 eatOperator val = scanToken >>= validateOperator val
+eatKeyword :: String -> ParseAction ()
+eatKeyword val = scanToken >>= validateKeyword val
 
 
-shouldContinueParse :: ParseState Bool
+shouldContinueParse :: ParseAction Bool
 shouldContinueParse = do
     headToken <- peekToken
     return $ headToken /= Eof
 
--- Parse a function
--- once it is parsed, insert it into the state
-parseAndInsertFunction :: ParseState ()
-parseAndInsertFunction = do
-    func <- parseFunction
-    (tokList, funcList) <- get
-    put (tokList, funcList ++ [func])
-
-parseProg :: [Token] -> Maybe Program
-parseProg initialList =
-    fmap snd (execStateT whatToExecute initialState)
+parseProg :: String -> Maybe Program
+parseProg progStr =
+    fmap (\finalState -> (funcList finalState, structList finalState)) (execStateT whatToExecute (initialState progStr))
   where
-    initialState = (initialList, [])
-    whatToExecute = whileM_ shouldContinueParse parseAndInsertFunction
+    whatToExecute = whileM_ shouldContinueParse parseTopLevel
+
+parseTopLevel :: ParseAction ()
+parseTopLevel = do
+    token <- peekToken
+    case token of 
+        Keyword "struct" -> parseAndInsertStruct
+        TypeName _ -> parseAndInsertFunction
+        _ -> raiseFailure
+  where
+    parseAndInsertFunction :: ParseAction ()
+    parseAndInsertFunction = do
+        func <- parseFunction
+        ParseState lexer env funcs structs <- get
+        put $ ParseState lexer env (funcs ++ [func]) structs
+    parseAndInsertStruct :: ParseAction ()
+    parseAndInsertStruct = do
+        struct@(StructDefinition (name, _)) <- parseStruct
+        ParseState lexer env funcs structs <- get
+        put $ ParseState lexer (S.insert name env) funcs (structs ++ [struct])
+
+parseStruct :: ParseAction StructDefinition
+parseStruct = do
+    eatKeyword "struct"
+    id <- scanIdentifier
+    eatPunctuation "{"
+    structMembers <- whileM (isTypeName <$> peekToken) parseStructMember
+    eatPunctuation "}"
+    return $ StructDefinition (id, structMembers)
+  where
+    parseStructMember :: ParseAction (DataType, String)
+    parseStructMember = do
+        memberType <- parseType
+        id <- scanIdentifier
+        eatPunctuation ";"
+        return (memberType, id)
 
 -- Return a parsed function as a SyntaxNode
-parseFunction :: ParseState SyntaxNode
+parseFunction :: ParseAction FunctionDefinition 
 parseFunction = do
     typeName <- parseType
     id <- scanIdentifier
@@ -205,10 +183,10 @@ parseFunction = do
     paramList <- parseParamList
     eatPunctuation ")"
     blockNode <- parseBlock
-    return $ FunctionDefinitionNode typeName id paramList blockNode
+    return $ FunctionDefinition typeName id paramList blockNode
 
 
-parseParamList :: ParseState ParameterList
+parseParamList :: ParseAction ParameterList
 parseParamList = do
     typeToken <- peekToken
     if isTypeName typeToken
@@ -216,14 +194,14 @@ parseParamList = do
       else return []
   where
     -- Parses the full param list, given there is at least one parameter
-    doActualParseParamList :: ParseState ParameterList
+    doActualParseParamList :: ParseAction ParameterList
     doActualParseParamList = do
         typeName <- parseType
         id <- scanIdentifier
         ((typeName, id):) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaParam
       where
         -- Parses a single ", typename identifier"
-        parseCommaParam :: ParseState (DataType, String)
+        parseCommaParam :: ParseAction (DataType, String)
         parseCommaParam = do
             eatToken
             typeName <- parseType
@@ -231,7 +209,7 @@ parseParamList = do
             return (typeName, id)
 
 -- block = '{' stmt* '}'
-parseBlock :: ParseState SyntaxNode
+parseBlock :: ParseAction SyntaxNode
 parseBlock = do
     eatPunctuation "{"
     statementList <- whileM (peekToken >>= return . not . punctuationMatches "}") parseStatement 
@@ -268,10 +246,10 @@ isContinue = controlMatches "continue"
 isBreak :: Token -> Bool 
 isBreak = controlMatches "break"
 
-parseStatement :: ParseState SyntaxNode
+parseStatement :: ParseAction SyntaxNode
 parseStatement = peekToken >>= parseStatementLookahead
   where
-    parseStatementLookahead :: Token -> ParseState SyntaxNode
+    parseStatementLookahead :: Token -> ParseAction SyntaxNode
     parseStatementLookahead lookahead
         | isDecl lookahead        = do
             node <- parseDeclaration
@@ -302,7 +280,7 @@ parseStatement = peekToken >>= parseStatementLookahead
             return BreakNode
         | otherwise               = raiseFailure
 
-parseCondition :: ParseState SyntaxNode
+parseCondition :: ParseAction SyntaxNode
 parseCondition = do
     eatControl "if"
     eatPunctuation "("
@@ -317,7 +295,7 @@ parseCondition = do
             return $ IfElseNode expressionNode block elseBlock
         else return $ IfNode expressionNode block
 
-parseWhileLoop :: ParseState SyntaxNode
+parseWhileLoop :: ParseAction SyntaxNode
 parseWhileLoop = do
     eatControl "while"
     eatPunctuation "("
@@ -326,27 +304,27 @@ parseWhileLoop = do
     block <- parseBlock
     return (WhileNode expressionNode block)
 
-parseForInit :: ParseState SyntaxNode
+parseForInit :: ParseAction SyntaxNode
 parseForInit = peekToken >>= parseForInitLookahead
   where
-    parseForInitLookahead :: Token -> ParseState SyntaxNode
+    parseForInitLookahead :: Token -> ParseAction SyntaxNode
     parseForInitLookahead lookahead
         | isDecl lookahead                 = parseDeclaration
         | isExpression lookahead           = parseExpression
         | punctuationMatches ";" lookahead = return EmptyNode
         | otherwise                        = raiseFailure
 
-parseForExpr :: ParseState SyntaxNode
+parseForExpr :: ParseAction SyntaxNode
 parseForExpr = peekToken >>= parseForExprLookahead
   where
-    parseForExprLookahead :: Token -> ParseState SyntaxNode
+    parseForExprLookahead :: Token -> ParseAction SyntaxNode
     parseForExprLookahead lookahead
         | isExpression lookahead           = parseExpression
         | punctuationMatches ";" lookahead ||
           punctuationMatches ")" lookahead = return EmptyNode
         | otherwise                        = raiseFailure
 
-parseForLoop :: ParseState SyntaxNode
+parseForLoop :: ParseAction SyntaxNode
 parseForLoop = do
     eatControl "for"
     eatPunctuation "("
@@ -359,7 +337,7 @@ parseForLoop = do
     block <- parseBlock
     return $ ForNode forInit forCond forExpr block
 
-parseDeclaration :: ParseState SyntaxNode
+parseDeclaration :: ParseAction SyntaxNode
 parseDeclaration = do
     typeName <- parseType
     id <- scanIdentifier
@@ -371,13 +349,13 @@ parseDeclaration = do
             return (DefinitionNode typeName id expressionNode)
         _ -> return (DeclarationNode typeName id)
 
-parseReturn :: ParseState SyntaxNode
+parseReturn :: ParseAction SyntaxNode
 parseReturn = do
     eatControl "return"
     expressionNode <- parseExpression
     return $ ReturnNode expressionNode
 
-parseExpression :: ParseState SyntaxNode
+parseExpression :: ParseAction SyntaxNode
 parseExpression = parseAssignment
     
 assignOpsList :: S.Set String
@@ -387,10 +365,10 @@ isAssignmentOperator :: Token -> Bool
 isAssignmentOperator (Operator op) = S.member op assignOpsList
 isAssignmentOperator _             = False
 
-scanAssignmentOperator :: ParseState ()
+scanAssignmentOperator :: ParseAction ()
 scanAssignmentOperator = scanToken >>= \x -> unless (isAssignmentOperator x) raiseFailure
 
-parseAssignment :: ParseState SyntaxNode
+parseAssignment :: ParseAction SyntaxNode
 parseAssignment = do
     startState <- get
     let dryRun = runStateT (parseLvalue >> scanAssignmentOperator) startState
@@ -412,7 +390,7 @@ parseAssignment = do
         | otherwise = error "getAssignOp should never receive an invalid assign operator"
     getAssignOp _ = error "getAssignOp should never receive an invalid assign operator"
 
-parseLvalue :: ParseState SyntaxNode
+parseLvalue :: ParseAction SyntaxNode
 parseLvalue = do
     token <- peekToken
     if operatorMatches "*" token
@@ -426,52 +404,52 @@ parseLvalue = do
 type BinaryNodeCombinator = SyntaxNode -> SyntaxNode -> SyntaxNode
 
 parseOpPrecedence
-    :: ParseState SyntaxNode -- Subexpr parser action
+    :: ParseAction SyntaxNode -- Subexpr parser action
     -> [(String, BinaryNodeCombinator)] -- (Operator, combinator) pairs
-    -> ParseState SyntaxNode -- Root node
+    -> ParseAction SyntaxNode -- Root node
 parseOpPrecedence parseAction opCombine = do
     init <- parseAction
     equalPrecedenceList <- whileM shouldContinue execMatched
     return $ L.foldl' (\a (node, combine) -> combine a node) init equalPrecedenceList
   where
     checks = map (\(op, combine) -> (operatorMatches op, combine)) opCombine
-    shouldContinue :: ParseState Bool
+    shouldContinue :: ParseAction Bool
     shouldContinue = do
         nextTok <- peekToken
         return $ any (($ nextTok) . fst) checks
-    execMatched :: ParseState (SyntaxNode, BinaryNodeCombinator)
+    execMatched :: ParseAction (SyntaxNode, BinaryNodeCombinator)
     execMatched = do
         nextTok <- scanToken
         let combineFn = snd $ head $ filter (($ nextTok) . fst) checks
         nextExpr <- parseAction
         return (nextExpr, combineFn) 
 
-parseLogicOr :: ParseState SyntaxNode
+parseLogicOr :: ParseAction SyntaxNode
 parseLogicOr = parseOpPrecedence parseLogicAnd [("||", BinaryOpNode Or)]
 
-parseLogicAnd :: ParseState SyntaxNode
+parseLogicAnd :: ParseAction SyntaxNode
 parseLogicAnd = parseOpPrecedence parseEqComp [("&&", BinaryOpNode And)]
 
-parseEqComp :: ParseState SyntaxNode
+parseEqComp :: ParseAction SyntaxNode
 parseEqComp = parseOpPrecedence parseOrdComp [("==", BinaryOpNode Equal),
                                               ("!=", BinaryOpNode NotEqual)]
 
-parseOrdComp :: ParseState SyntaxNode
+parseOrdComp :: ParseAction SyntaxNode
 parseOrdComp = parseOpPrecedence parseAddition [(">", BinaryOpNode GreaterThan),
                                                 ("<", BinaryOpNode LessThan),
                                                 (">=", BinaryOpNode GreaterThanOrEqual),
                                                 ("<=", BinaryOpNode LessThanOrEqual)]
 
-parseAddition :: ParseState SyntaxNode
+parseAddition :: ParseAction SyntaxNode
 parseAddition = parseOpPrecedence parseMultiplication [("+", BinaryOpNode Addition),
                                                        ("-", BinaryOpNode Subtraction)]
 
-parseMultiplication :: ParseState SyntaxNode
+parseMultiplication :: ParseAction SyntaxNode
 parseMultiplication = parseOpPrecedence parseUnary [("*", BinaryOpNode Multiplication),
                                                     ("/", BinaryOpNode Division),
                                                     ("%", BinaryOpNode Mod)]
 
-parseUnary :: ParseState SyntaxNode
+parseUnary :: ParseAction SyntaxNode
 parseUnary = do
     maybeOp <- peekToken
     case () of _ 
@@ -493,7 +471,7 @@ parseUnary = do
                   return $ UnaryOpNode Dereference subUnary
                 | otherwise -> parseIndirection
 
-parseIndirection :: ParseState SyntaxNode
+parseIndirection :: ParseAction SyntaxNode
 parseIndirection = do
     (lookahead, lookahead2) <- peekTwoToken
     if isIdentifier lookahead && punctuationMatches "(" lookahead2
@@ -511,7 +489,7 @@ parseIndirection = do
         return $ foldl buildArrayIdxs node arrayIdxs
       where
         -- Parses a single ", typename identifier"
-        parseArrayIndex :: ParseState SyntaxNode
+        parseArrayIndex :: ParseAction SyntaxNode
         parseArrayIndex = do
             eatPunctuation "["
             arrayIdx <- parseExpression
@@ -520,7 +498,7 @@ parseIndirection = do
         buildArrayIdxs :: SyntaxNode -> SyntaxNode -> SyntaxNode
         buildArrayIdxs = ArrayIndexNode
     
-parseBaseExpr :: ParseState SyntaxNode
+parseBaseExpr :: ParseAction SyntaxNode
 parseBaseExpr = do
     lookahead <- peekToken
     case () of _
@@ -542,31 +520,31 @@ parseBaseExpr = do
         return expr
 
 type ArgumentList = [SyntaxNode]
-parseArgList :: ParseState ArgumentList
+parseArgList :: ParseAction ArgumentList
 parseArgList = do
     maybeExpr <- peekToken
     if isExpression maybeExpr
         then doActualParseArgList
         else return []
   where
-    doActualParseArgList :: ParseState ArgumentList
+    doActualParseArgList :: ParseAction ArgumentList
     doActualParseArgList = do
         firstArg <- parseExpression
         (firstArg:) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaArg
       where
-        parseCommaArg :: ParseState SyntaxNode
+        parseCommaArg :: ParseAction SyntaxNode
         parseCommaArg = do
             eatToken
             parseExpression
 
-parseType :: ParseState DataType
+parseType :: ParseAction DataType
 parseType = do
     basicType <- scanTypeName
     ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken >> return 0)
     arrLevels <- whileM (punctuationMatches "[" <$> peekToken) parseArrayDecl
     return (basicType, reverse $ ptrLevels ++ arrLevels)
   where
-    parseArrayDecl :: ParseState Int
+    parseArrayDecl :: ParseAction Int
     parseArrayDecl = do
         eatPunctuation "["
         constant <- scanConstant
@@ -577,8 +555,11 @@ parseType = do
             _             -> raiseFailure
 
 {-
-prog = function+
+prog = toplevel
+toplevel = function | structdecl
 function = type identifier '(' paramlist ')' block
+structdecl = 'struct' identifier '{' member* '}'
+member = type identifier ';'
 paramlist = type identifier (',' type identifier)* | ε
 block = '{' stmt* '}'
 stmt = declaration ';' | block | expression ';' | conditional | forloop | whileloop | ret ';' | 'continue' ';' | 'break' ';'
@@ -602,17 +583,10 @@ eqcomp = ordcomp ('==' ordcomp)* | ordcomp ('!=' orcomp)*
 ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' addition)* | addition ('>=' addition)*
 addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
 multiplication = unary ('*' unary)* | unary ('/' unary)* | unary ('%' unary)*
-unary = '-' unary | '!' unary | '&' unary | '*' unary | indirection
+unary = '-' unary | '!' unary | '&' unary | '*' unary | '(' type ')' | indirection
 indirection = identifier '(' arglist ')' ('[' expression ']')* | baseexpr ('[' expression ']')*
 baseexpr = identifier | constant | '(' expression ')'
 arglist = expression (',' expression)* | ε
-
-while (i > 3) {
-    i++;
-    continue;
-}
-
-
 type = basictype qualifier
 qualifier = '*'* '[' constant ']'*
 basictype = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
