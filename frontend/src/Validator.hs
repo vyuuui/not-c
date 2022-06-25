@@ -1,17 +1,15 @@
-module Validator
-( validateProgram
-
-) where
+module Validator ( validateProgram) where
 
 import qualified Data.Set as S
 import qualified Data.Map as M
 import qualified Data.List as L
 import Data.Maybe
+import CompilerShared
 import ParserStateful
 import Lexer
 import Debug.Trace
 
-data VarInfo = FunctionVar DataType [(DataType, String)] | PrimitiveVar DataType
+data VarInfo = FunctionVar DataType [(DataType, String)] | PrimitiveVar DataType | StructVar DataType
 data Environment = EnvLink Bool (M.Map String VarInfo) Environment | EnvBase (M.Map String VarInfo)
 
 insertIntoEnv :: Environment -> String -> VarInfo -> Environment
@@ -29,7 +27,7 @@ validateProgram program = let baseEnv = EnvBase (foldl addFunctionToEnvironment 
     all (checkFunction baseEnv) program
     where 
         addFunctionToEnvironment :: M.Map String VarInfo -> SyntaxNode -> M.Map String VarInfo
-        addFunctionToEnvironment env func = let FunctionDefinitionNode returnType name argList _ = func in
+        addFunctionToEnvironment env func = let FunctionDefinition returnType name argList _ = func in
             M.insert name (FunctionVar returnType argList) env
         checkFunction :: Environment -> SyntaxNode -> Bool
         checkFunction env node = let FunctionDefinitionNode typeName name argList body = node in

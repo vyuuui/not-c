@@ -24,6 +24,11 @@ loadAndParse file = do
         Just prog -> return prog
         Nothing -> error "Bad program nat!"
 
+getTypeEnv :: ParseAction TypeEnv
+getTypeEnv = typeEnv <$> get
+getLexerState :: ParseAction LexerState
+getLexerState = lexerState <$> get
+
 raiseFailure :: ParseAction a
 raiseFailure = lift Nothing
 
@@ -75,7 +80,6 @@ peekTwoToken = do
 -- error should never be hit, as below helpers should avoid invalid calls
 extractInner :: Token -> String
 extractInner (Identifier s)  = s
-extractInner (TypeName s)    = s
 extractInner (Operator s)    = s
 extractInner (Control s)     = s
 extractInner (Punctuation s) = s
@@ -91,8 +95,6 @@ checkTokenPredicate :: (Token -> Bool) -> Token -> ParseAction ()
 checkTokenPredicate check token = unless (check token) raiseFailure
 
 -- Helpers to validate several tokens, raises error if validation fails
-extractTypeNameIfValid :: Token -> ParseAction String
-extractTypeNameIfValid = extractStrIfValid isTypeName
 extractIdentifierIfValid :: Token -> ParseAction String
 extractIdentifierIfValid = extractStrIfValid isIdentifier
 extractOperatorIfValid :: Token -> ParseAction String
@@ -112,8 +114,6 @@ validateKeyword val = checkTokenPredicate (keywordMatches val)
 -- Helpers to consume a specific token (and extract contents for id/type)
 scanIdentifier :: ParseAction String
 scanIdentifier = scanToken >>= extractIdentifierIfValid
-scanTypeName :: ParseAction String
-scanTypeName = scanToken >>= extractTypeNameIfValid
 scanOperator :: ParseAction String
 scanOperator = scanToken >>= extractOperatorIfValid
 scanConstant :: ParseAction ConstantType
@@ -144,7 +144,7 @@ parseTopLevel = do
     token <- peekToken
     case token of 
         Keyword "struct" -> parseAndInsertStruct
-        TypeName _ -> parseAndInsertFunction
+        Identifier _ -> parseAndInsertFunction
         _ -> raiseFailure
   where
     parseAndInsertFunction :: ParseAction ()
@@ -160,10 +160,11 @@ parseTopLevel = do
 
 parseStruct :: ParseAction StructDefinition
 parseStruct = do
+    typeEnv <- getTypeEnv
     eatKeyword "struct"
     id <- scanIdentifier
     eatPunctuation "{"
-    structMembers <- whileM (isTypeName <$> peekToken) parseStructMember
+    structMembers <- whileM (isTypeName typeEnv <$> peekToken) parseStructMember
     eatPunctuation "}"
     return $ StructDefinition (id, structMembers)
   where
@@ -189,8 +190,9 @@ parseFunction = do
 parseParamList :: ParseAction ParameterList
 parseParamList = do
     typeToken <- peekToken
-    if isTypeName typeToken
-      then doActualParseParamList
+    typeEnv <- getTypeEnv
+    if isTypeName typeEnv typeToken
+    then doActualParseParamList
       else return []
   where
     -- Parses the full param list, given there is at least one parameter
@@ -220,9 +222,12 @@ parseBlock = do
     sequenceStatements :: [SyntaxNode] -> SyntaxNode
     sequenceStatements = L.foldl' SeqNode EmptyNode
 
+isTypeName :: TypeEnv -> Token -> Bool
+isTypeName env (Identifier id) = S.member id env
+isTypeName _ _                 = False
 -- For use to determine statement option, based on the START list for each
-isDecl :: Token -> Bool
-isDecl = isTypeName
+isDecl :: TypeEnv -> Token -> Token -> Bool
+isDecl env la1 la2 = isTypeName env la1 && isTypeName env la2
 isBlock :: Token -> Bool
 isBlock = punctuationMatches "{"
 isExpression :: Token -> Bool
@@ -247,34 +252,34 @@ isBreak :: Token -> Bool
 isBreak = controlMatches "break"
 
 parseStatement :: ParseAction SyntaxNode
-parseStatement = peekToken >>= parseStatementLookahead
+parseStatement = getTypeEnv >>= \env -> peekTwoToken >>= parseStatementLookahead env
   where
-    parseStatementLookahead :: Token -> ParseAction SyntaxNode
-    parseStatementLookahead lookahead
-        | isDecl lookahead        = do
+    parseStatementLookahead :: TypeEnv -> (Token, Token) -> ParseAction SyntaxNode
+    parseStatementLookahead env (lookahead1, lookahead2)
+        | isDecl env lookahead1 lookahead2 = do
             node <- parseDeclaration
             eatPunctuation ";"
             return node
-        | isBlock lookahead       = parseBlock
-        | isExpression lookahead  = do
+        | isBlock lookahead1       = parseBlock
+        | isExpression lookahead1  = do
             node <- parseExpression
             eatPunctuation ";"
             return node
-        | isConditional lookahead = parseCondition
-        | isWhileLoop lookahead   = parseWhileLoop
-        | isForLoop lookahead     = parseForLoop
-        | isReturn lookahead      = do
+        | isConditional lookahead1 = parseCondition
+        | isWhileLoop lookahead1   = parseWhileLoop
+        | isForLoop lookahead1     = parseForLoop
+        | isReturn lookahead1      = do
             node <- parseReturn
             eatPunctuation ";"
             return node
-        | isEmpty lookahead       = do
+        | isEmpty lookahead1       = do
             eatPunctuation ";"
             return EmptyNode
-        | isContinue lookahead    = do
+        | isContinue lookahead1    = do
             eatControl "continue"
             eatPunctuation ";"
             return ContinueNode
-        | isBreak lookahead    = do
+        | isBreak lookahead1    = do
             eatControl "break"
             eatPunctuation ";"
             return BreakNode
@@ -305,14 +310,14 @@ parseWhileLoop = do
     return (WhileNode expressionNode block)
 
 parseForInit :: ParseAction SyntaxNode
-parseForInit = peekToken >>= parseForInitLookahead
+parseForInit = getTypeEnv >>= \env -> peekTwoToken >>= parseForInitLookahead env
   where
-    parseForInitLookahead :: Token -> ParseAction SyntaxNode
-    parseForInitLookahead lookahead
-        | isDecl lookahead                 = parseDeclaration
-        | isExpression lookahead           = parseExpression
-        | punctuationMatches ";" lookahead = return EmptyNode
-        | otherwise                        = raiseFailure
+    parseForInitLookahead :: TypeEnv -> (Token, Token) -> ParseAction SyntaxNode
+    parseForInitLookahead env (lookahead1, lookahead2)
+        | isDecl env lookahead1 lookahead2  = parseDeclaration
+        | isExpression lookahead1           = parseExpression
+        | punctuationMatches ";" lookahead1 = return EmptyNode
+        | otherwise                         = raiseFailure
 
 parseForExpr :: ParseAction SyntaxNode
 parseForExpr = peekToken >>= parseForExprLookahead
@@ -475,18 +480,20 @@ parseIndirection :: ParseAction SyntaxNode
 parseIndirection = do
     (lookahead, lookahead2) <- peekTwoToken
     if isIdentifier lookahead && punctuationMatches "(" lookahead2
-      then parseCall >>= tryParseArray
-      else parseBaseExpr >>= tryParseArray
+      then parseCall >>= tryParseArray >>= tryParseMemberAccess
+      else parseBaseExpr >>= tryParseArray >>= tryParseMemberAccess
   where
+    parseCall :: ParseAction SyntaxNode
     parseCall = do
         id <- scanIdentifier
         eatPunctuation "("
         argList <- parseArgList
         eatPunctuation ")"
         return $ FunctionCallNode id argList
+    tryParseArray :: SyntaxNode -> ParseAction SyntaxNode
     tryParseArray node = do
         arrayIdxs <- whileM (punctuationMatches "[" <$> peekToken) parseArrayIndex 
-        return $ foldl buildArrayIdxs node arrayIdxs
+        return $ foldl ArrayIndexNode node arrayIdxs
       where
         -- Parses a single ", typename identifier"
         parseArrayIndex :: ParseAction SyntaxNode
@@ -495,9 +502,30 @@ parseIndirection = do
             arrayIdx <- parseExpression
             eatPunctuation "]"
             return arrayIdx
-        buildArrayIdxs :: SyntaxNode -> SyntaxNode -> SyntaxNode
-        buildArrayIdxs = ArrayIndexNode
-    
+    tryParseMemberAccess :: SyntaxNode -> ParseAction SyntaxNode
+    tryParseMemberAccess node = do
+        memberAccesses <- whileM (continueParsingMembers <$> peekToken) parseMemberAccess 
+        return $ foldl foldMemberAccess node memberAccesses
+      where
+        foldMemberAccess :: SyntaxNode -> (SyntaxNode, Bool) -> SyntaxNode
+        foldMemberAccess x (node, isPtr) = MemberAccessNode isPtr x node
+        continueParsingMembers :: Token -> Bool
+        continueParsingMembers token = operatorMatches "." token || operatorMatches "->" token
+        -- Parses a single ". identifier ('[' expression ']')*"
+        parseMemberAccess :: ParseAction (SyntaxNode, Bool)
+        parseMemberAccess = do
+            lookahead <- peekToken
+            case () of _
+                        | operatorMatches "." lookahead  -> do
+                            eatOperator "."
+                            idNode <- scanIdentifier >>= return . IdentifierNode
+                            tryParseArray idNode >>= \rhs -> return (rhs, False)
+                        | operatorMatches "->" lookahead -> do
+                            eatOperator "->"
+                            idNode <- scanIdentifier >>= return . IdentifierNode
+                            tryParseArray idNode >>= \rhs -> return (rhs, True)
+                        | otherwise                      -> raiseFailure
+
 parseBaseExpr :: ParseAction SyntaxNode
 parseBaseExpr = do
     lookahead <- peekToken
@@ -539,10 +567,10 @@ parseArgList = do
 
 parseType :: ParseAction DataType
 parseType = do
-    basicType <- scanTypeName
+    typeName <- scanIdentifier
     ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken >> return 0)
     arrLevels <- whileM (punctuationMatches "[" <$> peekToken) parseArrayDecl
-    return (basicType, reverse $ ptrLevels ++ arrLevels)
+    return (typeName, reverse $ ptrLevels ++ arrLevels)
   where
     parseArrayDecl :: ParseAction Int
     parseArrayDecl = do
@@ -584,12 +612,13 @@ ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' a
 addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
 multiplication = unary ('*' unary)* | unary ('/' unary)* | unary ('%' unary)*
 unary = '-' unary | '!' unary | '&' unary | '*' unary | '(' type ')' | indirection
-indirection = identifier '(' arglist ')' ('[' expression ']')* | baseexpr ('[' expression ']')*
+indirection = identifier '(' arglist ')' ('[' expression ']')* memberaccess*
+            | baseexpr ('[' expression ']')* memberaccess* 
+memberaccess = '.' identifier ('[' expression ']')*
 baseexpr = identifier | constant | '(' expression ')'
 arglist = expression (',' expression)* | ε
-type = basictype qualifier
+type = identifier qualifier
 qualifier = '*'* '[' constant ']'*
-basictype = 'void' | 'char' | 'short' | 'int' | 'long' | 'float' | 'double' | 'bool'
 constant = 'true' | 'false' | number
 number = -?[0-9]+\.[0-9]*
 identifier = [A-Za-z][A-Za-z0-9_]*

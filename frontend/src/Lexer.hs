@@ -10,7 +10,7 @@ import Debug.Trace
 type LexerResult = (Token, String)
 
 operators :: S.Set String
-operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!", "&"]
+operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!", "&", "->", "."]
 control :: S.Set String
 control = S.fromList ["if", "else", "for", "while", "return", "break", "continue"]
 punctuation :: S.Set String
@@ -69,7 +69,6 @@ lexStringNoComment env str2@(h:t)
         | str == "false"           = Constant $ BoolConstant False
         | S.member str control     = Control str
         | S.member str punctuation = Punctuation str
-        | S.member str env         = TypeName str
         | S.member str keyword     = Keyword str
         | otherwise                = Identifier str
     lexOperator :: String -> LexerResult

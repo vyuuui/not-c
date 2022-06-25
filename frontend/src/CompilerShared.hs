@@ -21,6 +21,9 @@ newtype StructDefinition = StructDefinition (String, [(DataType, String)]) deriv
 baseTypes :: S.Set String
 baseTypes = S.fromList ["void", "char", "short", "int", "long", "float", "bool"]
 
+isBaseType :: DataType -> Bool
+isBaseType (name, _) = S.member name baseTypes
+
 initialState :: String -> ParseState
 initialState progStr = ParseState ([], progStr) baseTypes [] []
 
@@ -45,7 +48,6 @@ data ConstantType
 
 data Token
     = Identifier String
-    | TypeName String
     | Constant ConstantType
     | Operator String
     | Control String
@@ -58,10 +60,6 @@ data Token
 isIdentifier :: Token -> Bool
 isIdentifier (Identifier _) = True
 isIdentifier _              = False
-
-isTypeName :: Token -> Bool
-isTypeName (TypeName _) = True
-isTypeName _            = False
 
 isConstant :: Token -> Bool
 isConstant (Constant _) = True
@@ -131,6 +129,7 @@ data SyntaxNode
     | BinaryOpNode BinaryOp SyntaxNode SyntaxNode
     | UnaryOpNode UnaryOp SyntaxNode
     | AssignmentNode SyntaxNode AssignmentOp SyntaxNode
+    | MemberAccessNode Bool SyntaxNode SyntaxNode
     deriving Show
 
 data BinaryOp
