@@ -8,12 +8,11 @@ import Control.Monad
 import Control.Monad.Loops ( iterateUntilM, whileM_, whileM, untilM )
 import Control.Monad.Trans
 import Control.Monad.Trans.State.Lazy
-import Data.Maybe
+import Data.Either
 import Debug.Trace
 import Lexer
 import System.IO
 
-type Program = ([FunctionDefinition], [StructDefinition])
 type ParameterList = [(DataType, String)]
 
 loadAndParse :: String -> IO Program
@@ -21,16 +20,13 @@ loadAndParse file = do
     handle <- openFile file ReadMode
     contents <- hGetContents handle
     case parseProg contents of
-        Just prog -> return prog
-        Nothing -> error "Bad program nat!"
+        Right prog -> return prog
+        Left msg -> error ("Bad program nat! msg=" ++ msg)
 
 getTypeEnv :: ParseAction TypeEnv
 getTypeEnv = typeEnv <$> get
 getLexerState :: ParseAction LexerState
 getLexerState = lexerState <$> get
-
-raiseFailure :: ParseAction a
-raiseFailure = lift Nothing
 
 -- Lexes a new token, adding it to the LexerState
 -- Returns the newly lexed token
@@ -90,9 +86,9 @@ extractStrIfValid :: (Token -> Bool) -> Token -> ParseAction String
 extractStrIfValid check token =
     if check token
       then return (extractInner token)
-      else raiseFailure
+      else raiseFailure "Failed to extract valid token"
 checkTokenPredicate :: (Token -> Bool) -> Token -> ParseAction ()
-checkTokenPredicate check token = unless (check token) raiseFailure
+checkTokenPredicate check token = unless (check token) (raiseFailure "Token validation failed")
 
 -- Helpers to validate several tokens, raises error if validation fails
 extractIdentifierIfValid :: Token -> ParseAction String
@@ -101,7 +97,7 @@ extractOperatorIfValid :: Token -> ParseAction String
 extractOperatorIfValid = extractStrIfValid isOperator
 extractConstantIfValid :: Token -> ParseAction ConstantType
 extractConstantIfValid (Constant val) = return val
-extractConstantIfValid _              = raiseFailure
+extractConstantIfValid _              = raiseFailure "Expected constant token"
 validatePunctuation :: String -> Token -> ParseAction ()
 validatePunctuation val = checkTokenPredicate (punctuationMatches val)
 validateControl :: String -> Token -> ParseAction ()
@@ -133,7 +129,7 @@ shouldContinueParse = do
     headToken <- peekToken
     return $ headToken /= Eof
 
-parseProg :: String -> Maybe Program
+parseProg :: String -> Either String Program
 parseProg progStr =
     fmap (\finalState -> (funcList finalState, structList finalState)) (execStateT whatToExecute (initialState progStr))
   where
@@ -145,7 +141,7 @@ parseTopLevel = do
     case token of 
         Keyword "struct" -> parseAndInsertStruct
         Identifier _ -> parseAndInsertFunction
-        _ -> raiseFailure
+        _ -> raiseFailure "Unexpected top level token"
   where
     parseAndInsertFunction :: ParseAction ()
     parseAndInsertFunction = do
@@ -227,7 +223,7 @@ isTypeName env (Identifier id) = S.member id env
 isTypeName _ _                 = False
 -- For use to determine statement option, based on the START list for each
 isDecl :: TypeEnv -> Token -> Token -> Bool
-isDecl env la1 la2 = isTypeName env la1 && isTypeName env la2
+isDecl env la1 la2 = isTypeName env la1 && isIdentifier la2
 isBlock :: Token -> Bool
 isBlock = punctuationMatches "{"
 isExpression :: Token -> Bool
@@ -252,38 +248,42 @@ isBreak :: Token -> Bool
 isBreak = controlMatches "break"
 
 parseStatement :: ParseAction SyntaxNode
-parseStatement = getTypeEnv >>= \env -> peekTwoToken >>= parseStatementLookahead env
+parseStatement = do
+    startState <- get
+    let dryRun = runStateT (parseDeclaration >> eatPunctuation ";") startState
+    if isRight dryRun
+      then do
+        node <- parseDeclaration
+        eatPunctuation ";"
+        return node
+      else getTypeEnv >>= \env -> peekToken >>= parseStatementLookahead env
   where
-    parseStatementLookahead :: TypeEnv -> (Token, Token) -> ParseAction SyntaxNode
-    parseStatementLookahead env (lookahead1, lookahead2)
-        | isDecl env lookahead1 lookahead2 = do
-            node <- parseDeclaration
-            eatPunctuation ";"
-            return node
-        | isBlock lookahead1       = parseBlock
-        | isExpression lookahead1  = do
+    parseStatementLookahead :: TypeEnv -> Token -> ParseAction SyntaxNode
+    parseStatementLookahead env lookahead
+        | isBlock lookahead       = parseBlock
+        | isExpression lookahead  = do
             node <- parseExpression
             eatPunctuation ";"
             return node
-        | isConditional lookahead1 = parseCondition
-        | isWhileLoop lookahead1   = parseWhileLoop
-        | isForLoop lookahead1     = parseForLoop
-        | isReturn lookahead1      = do
+        | isConditional lookahead = parseCondition
+        | isWhileLoop lookahead   = parseWhileLoop
+        | isForLoop lookahead     = parseForLoop
+        | isReturn lookahead      = do
             node <- parseReturn
             eatPunctuation ";"
             return node
-        | isEmpty lookahead1       = do
+        | isEmpty lookahead       = do
             eatPunctuation ";"
             return EmptyNode
-        | isContinue lookahead1    = do
+        | isContinue lookahead    = do
             eatControl "continue"
             eatPunctuation ";"
             return ContinueNode
-        | isBreak lookahead1    = do
+        | isBreak lookahead       = do
             eatControl "break"
             eatPunctuation ";"
             return BreakNode
-        | otherwise               = raiseFailure
+        | otherwise               = raiseFailure "Unexpected token when parsing statement"
 
 parseCondition :: ParseAction SyntaxNode
 parseCondition = do
@@ -317,7 +317,7 @@ parseForInit = getTypeEnv >>= \env -> peekTwoToken >>= parseForInitLookahead env
         | isDecl env lookahead1 lookahead2  = parseDeclaration
         | isExpression lookahead1           = parseExpression
         | punctuationMatches ";" lookahead1 = return EmptyNode
-        | otherwise                         = raiseFailure
+        | otherwise                         = raiseFailure "Unexpected token in for loop init"
 
 parseForExpr :: ParseAction SyntaxNode
 parseForExpr = peekToken >>= parseForExprLookahead
@@ -327,7 +327,7 @@ parseForExpr = peekToken >>= parseForExprLookahead
         | isExpression lookahead           = parseExpression
         | punctuationMatches ";" lookahead ||
           punctuationMatches ")" lookahead = return EmptyNode
-        | otherwise                        = raiseFailure
+        | otherwise                        = raiseFailure "Unexpected token in for loop expression"
 
 parseForLoop :: ParseAction SyntaxNode
 parseForLoop = do
@@ -371,13 +371,13 @@ isAssignmentOperator (Operator op) = S.member op assignOpsList
 isAssignmentOperator _             = False
 
 scanAssignmentOperator :: ParseAction ()
-scanAssignmentOperator = scanToken >>= \x -> unless (isAssignmentOperator x) raiseFailure
+scanAssignmentOperator = scanToken >>= \x -> unless (isAssignmentOperator x) (raiseFailure "Expected assignment token operator")
 
 parseAssignment :: ParseAction SyntaxNode
 parseAssignment = do
     startState <- get
     let dryRun = runStateT (parseLvalue >> scanAssignmentOperator) startState
-    if isJust dryRun
+    if isRight dryRun
       then do
         lhs <- parseLvalue
         assignOp <- scanToken
@@ -524,7 +524,7 @@ parseIndirection = do
                             eatOperator "->"
                             idNode <- scanIdentifier >>= return . IdentifierNode
                             tryParseArray idNode >>= \rhs -> return (rhs, True)
-                        | otherwise                      -> raiseFailure
+                        | otherwise                      -> raiseFailure "Unexpected token when parsing member access"
 
 parseBaseExpr :: ParseAction SyntaxNode
 parseBaseExpr = do
@@ -533,7 +533,7 @@ parseBaseExpr = do
                 | isIdentifier lookahead           -> parseId
                 | isConstant lookahead             -> parseConstant
                 | punctuationMatches "(" lookahead -> parseParenthesis
-                | otherwise                        -> raiseFailure
+                | otherwise                        -> raiseFailure "Unexpected type in base expression"
   where
     parseId = do
         id <- scanIdentifier
@@ -580,7 +580,7 @@ parseType = do
             IntConstant v -> do
                 eatPunctuation "]"
                 return (fromIntegral v)
-            _             -> raiseFailure
+            _             -> raiseFailure "Non-integer type used in array index"
 
 {-
 prog = toplevel

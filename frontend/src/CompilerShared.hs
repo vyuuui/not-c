@@ -3,11 +3,13 @@ module CompilerShared where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad.Trans.State.Lazy ( StateT )
+import Control.Monad.Trans (lift)
 
 type TypeEnv = S.Set String
 type LexerState = ([Token], String)
 type DataType = (String, [Int])
-type ParseAction = StateT ParseState Maybe
+type ParseAction = StateT ParseState (Either String)
+type Program = ([FunctionDefinition], [StructDefinition])
 
 data FunctionDefinition = FunctionDefinition
     { returnType :: DataType
@@ -17,6 +19,12 @@ data FunctionDefinition = FunctionDefinition
     }
     deriving Show
 newtype StructDefinition = StructDefinition (String, [(DataType, String)]) deriving Show
+
+showDt :: DataType -> String
+showDt (dataTypeName, ptrList) = dataTypeName ++ concatMap (\x -> if x > 0 then "[" ++ show x ++ "]" else "*") ptrList
+
+raiseFailure :: String -> StateT s (Either String) a
+raiseFailure msg = lift (Left msg)
 
 baseTypes :: S.Set String
 baseTypes = S.fromList ["void", "char", "short", "int", "long", "float", "bool"]

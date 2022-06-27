@@ -59,6 +59,7 @@
 
 - ignore: {name: Use <$>, within: ParserStateful}
 - ignore: {name: Use <&>, within: ParserStateful}
+- ignore: {name: Use <&>, within: Validator}
 
 # Define some custom infix operators
 # - fixity: infixr 3 ~^#^~
