@@ -4,11 +4,12 @@ import qualified Data.Set as S
 import qualified Data.Map as M
 import qualified Data.List as L
 import Data.Maybe
+import Data.Functor ((<&>))
 import CompilerShared
 import Control.Monad
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Loops
-import ParserStateful
+import Parser
 import Lexer
 import Debug.Trace
 
@@ -46,7 +47,7 @@ pushEnvironment isLoop =
     get >>= putEnvironment . EnvLink isLoop M.empty . environment
 
 popEnvironment :: GeneratorAction ()
-popEnvironment = (get >>= return . popEnvironmentHelper . environment) >>= putEnvironment
+popEnvironment = get >>= putEnvironment . popEnvironmentHelper . environment
   where
     popEnvironmentHelper :: Environment -> Environment
     popEnvironmentHelper (EnvLink _ _ env) = env
@@ -80,12 +81,9 @@ validateInLoop = get >>= (\st -> unless (isInLoop $ environment st) (raiseFailur
 
 validateProgram :: Program -> Either String Program
 validateProgram (funcs, structs) =
-    let result = evalStateT
-         (validateAllStructs structs >> validateAllFunctions funcs >>= \x -> return (x, structs))
-         (GeneratorState M.empty (EnvBase M.empty))
-    in case result of
-        Left err       -> Left err
-        _              -> result
+    evalStateT
+      (validateAllStructs structs >> validateAllFunctions funcs >>= \x -> return (x, structs))
+      (GeneratorState M.empty (EnvBase M.empty))
     where 
         validateAllStructs :: [StructDefinition] -> GeneratorAction ()
         validateAllStructs = mapM_ (\x -> validateStruct x >> addStruct x)
@@ -219,10 +217,9 @@ validateBinaryOp op lhs rhs = do
           (typeCheckBinaryOpHelper op lhsType rhsType)
           (raiseFailure $ "Type mismatch for " ++ show op ++ " between " ++ lhsTypeName ++ " and " ++ rhsTypeName)
         ourType <- decltype (BinaryOpNode op lhs rhs)
-        case () of _
-                    | ourType /= lhsType -> return (CastNode lhs ourType, rhs)
-                    | ourType /= rhsType -> return (lhs, CastNode rhs ourType)
-                    | otherwise          -> return (lhs, rhs)
+        if | ourType /= lhsType -> return (CastNode lhs ourType, rhs)
+           | ourType /= rhsType -> return (lhs, CastNode rhs ourType)
+           | otherwise          -> return (lhs, rhs)
   where 
     typeCheckBinaryOpHelper :: BinaryOp -> DataType -> DataType -> Bool
     typeCheckBinaryOpHelper op lhsType rhsType
@@ -255,13 +252,12 @@ validateUnaryOp op sub = unlessM (validateUnaryOpHelper op sub) (raiseFailure $ 
     validateUnaryOpHelper :: UnaryOp -> SyntaxNode -> GeneratorAction Bool
     validateUnaryOpHelper op sub = do
         subType <- decltype sub
-        case () of _
-                    | op == Negate       -> return $ isIntegralType subType || isFloatType subType
-                    | op == Not          -> return $ isBoolType subType
-                    | op == Dereference  -> return $ isPointerType subType
-                    | op == Reference    -> return $ case sub of
-                                           (IdentifierNode _) -> True
-                                           _                  -> False
+        if | op == Negate       -> return $ isIntegralType subType || isFloatType subType
+           | op == Not          -> return $ isBoolType subType
+           | op == Dereference  -> return $ isPointerType subType
+           | op == Reference    -> return $ case sub of
+                                            (IdentifierNode _) -> True
+                                            _                  -> False
 
 validateArrayIndexing :: SyntaxNode -> SyntaxNode -> GeneratorAction ()
 validateArrayIndexing arr idx = do
@@ -269,16 +265,15 @@ validateArrayIndexing arr idx = do
     idxType <- decltype idx
     let arrTypeName = showDt arrType
     let idxTypeName = showDt idxType
-    case () of _
-                | not $ isPointerType arrType  -> raiseFailure $ "Array indexing cannot be done on type " ++ arrTypeName
-                | not $ isIntegralType idxType -> raiseFailure $ "Array index cannot be type " ++ idxTypeName
-                | otherwise                    -> return ()
+    if | not $ isPointerType arrType  -> raiseFailure $ "Array indexing cannot be done on type " ++ arrTypeName
+       | not $ isIntegralType idxType -> raiseFailure $ "Array index cannot be type " ++ idxTypeName
+       | otherwise                    -> return ()
 
 validateMemberAccess :: SyntaxNode -> [(DataType, String)] -> GeneratorAction SyntaxNode
 validateMemberAccess (MemberAccessNode isPtr lhs rhs) _ = do
     lhsType@(lhsName, _) <- decltype lhs
     nlhs <- validateSyntaxNode lhs
-    unlessM (get >>= return . isStructType lhsType . structMap) (raiseFailure "Tried to access member of non-struct type")
+    unlessM (get <&> isStructType lhsType . structMap) (raiseFailure "Tried to access member of non-struct type")
     unless (isPtr == isPointerType lhsType) (raiseFailure "Tried to access member of non-pointer type")
     structs <- structMap <$> get
     let structMembers = M.lookup lhsName structs
@@ -430,14 +425,14 @@ validateSyntaxNode statement = case statement of
         return $ CastNode node dataType
 
 canShadow :: String -> GeneratorAction Bool
-canShadow varName = get >>= return . canShadowHelper varName . environment
+canShadow varName = get <&> canShadowHelper varName . environment
   where
     canShadowHelper :: String -> Environment -> Bool
     canShadowHelper varName (EnvLink _ map nextEnv) = not $ M.member varName map
     canShadowHelper varName (EnvBase map) = not $ M.member varName map
 
 lookupVar :: String -> GeneratorAction (Either String VarInfo)
-lookupVar varName = get >>= return . lookupVarHelper varName . environment
+lookupVar varName = get <&> lookupVarHelper varName . environment
   where
     lookupVarHelper :: String -> Environment -> Either String VarInfo
     lookupVarHelper varName (EnvLink _ map nextEnv) =

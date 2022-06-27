@@ -1,6 +1,6 @@
 module Generator where
 
-import ParserStateful
+import Parser
 import CompilerShared
 import Control.Monad
 import Control.Monad.Trans

@@ -93,7 +93,7 @@ lexStringSingle env str@(h1:h2:t)
   where
     findCommentEnd :: String -> String
     findCommentEnd (h1:h2:t)
-      | h1 == '*' && h2 == '/' = t
-      | otherwise              = findCommentEnd (h2:t)
+        | h1 == '*' && h2 == '/' = t
+        | otherwise              = findCommentEnd (h2:t)
 lexStringSingle env str@[h1] = lexStringNoComment env str
 lexStringSingle _ []         = (Eof, [])

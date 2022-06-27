@@ -1,4 +1,4 @@
-module ParserStateful where
+module Parser where
 
 import qualified Data.Set as S
 import qualified Data.Map as M
@@ -9,6 +9,7 @@ import Control.Monad.Loops ( iterateUntilM, whileM_, whileM, untilM )
 import Control.Monad.Trans
 import Control.Monad.Trans.State.Lazy
 import Data.Either
+import Data.Functor
 import Debug.Trace
 import Lexer
 import System.IO
@@ -234,7 +235,7 @@ parseBlock :: ParseAction SyntaxNode
 parseBlock = do
     eatPunctuation "{"
     pushSymbolEnv
-    statementList <- whileM (peekToken >>= return . not . punctuationMatches "}") parseStatement 
+    statementList <- whileM (peekToken <&> not . punctuationMatches "}") parseStatement 
     popSymbolEnv
     eatPunctuation "}"
     return $ sequenceStatements statementList
@@ -484,24 +485,19 @@ parseMultiplication = parseOpPrecedence parseUnary [("*", BinaryOpNode Multiplic
 parseUnary :: ParseAction SyntaxNode
 parseUnary = do
     maybeOp <- peekToken
-    case () of _ 
-                | operatorMatches "-" maybeOp -> do
-                  eatToken
-                  subUnary <- parseUnary
-                  return $ UnaryOpNode Negate subUnary
-                | operatorMatches "!" maybeOp -> do
-                  eatToken
-                  subUnary <- parseUnary
-                  return $ UnaryOpNode Not subUnary
-                | operatorMatches "&" maybeOp -> do
-                  eatToken
-                  subUnary <- parseUnary
-                  return $ UnaryOpNode Reference subUnary
-                | operatorMatches "*" maybeOp -> do
-                  eatToken
-                  subUnary <- parseUnary
-                  return $ UnaryOpNode Dereference subUnary
-                | otherwise -> parseIndirection
+    if | operatorMatches "-" maybeOp -> do
+             eatToken
+             UnaryOpNode Negate <$> parseUnary
+       | operatorMatches "!" maybeOp -> do
+             eatToken
+             UnaryOpNode Not <$> parseUnary
+       | operatorMatches "&" maybeOp -> do
+             eatToken
+             UnaryOpNode Reference <$> parseUnary
+       | operatorMatches "*" maybeOp -> do
+             eatToken
+             UnaryOpNode Dereference <$> parseUnary
+       | otherwise -> parseIndirection
 
 parseIndirection :: ParseAction SyntaxNode
 parseIndirection = do
@@ -520,7 +516,7 @@ parseIndirection = do
     tryParseArray :: SyntaxNode -> ParseAction SyntaxNode
     tryParseArray node = do
         arrayIdxs <- whileM (punctuationMatches "[" <$> peekToken) parseArrayIndex 
-        return $ foldl ArrayIndexNode node arrayIdxs
+        return $ L.foldl' ArrayIndexNode node arrayIdxs
       where
         -- Parses a single ", typename identifier"
         parseArrayIndex :: ParseAction SyntaxNode
@@ -532,7 +528,7 @@ parseIndirection = do
     tryParseMemberAccess :: SyntaxNode -> ParseAction SyntaxNode
     tryParseMemberAccess node = do
         memberAccesses <- whileM (continueParsingMembers <$> peekToken) parseMemberAccess 
-        return $ foldl foldMemberAccess node memberAccesses
+        return $ L.foldl' foldMemberAccess node memberAccesses
       where
         foldMemberAccess :: SyntaxNode -> (SyntaxNode, Bool) -> SyntaxNode
         foldMemberAccess x (node, isPtr) = MemberAccessNode isPtr x node
@@ -542,32 +538,29 @@ parseIndirection = do
         parseMemberAccess :: ParseAction (SyntaxNode, Bool)
         parseMemberAccess = do
             lookahead <- peekToken
-            case () of _
-                        | operatorMatches "." lookahead  -> do
-                            eatOperator "."
-                            idNode <- scanIdentifier >>= return . IdentifierNode
-                            tryParseArray idNode >>= \rhs -> return (rhs, False)
-                        | operatorMatches "->" lookahead -> do
-                            eatOperator "->"
-                            idNode <- scanIdentifier >>= return . IdentifierNode
-                            tryParseArray idNode >>= \rhs -> return (rhs, True)
-                        | otherwise                      -> raiseFailure "Unexpected token when parsing member access"
+            if | operatorMatches "." lookahead  -> do
+                     eatOperator "."
+                     idNode <- scanIdentifier <&> IdentifierNode
+                     tryParseArray idNode >>= \rhs -> return (rhs, False)
+               | operatorMatches "->" lookahead -> do
+                     eatOperator "->"
+                     idNode <- scanIdentifier <&> IdentifierNode
+                     tryParseArray idNode >>= \rhs -> return (rhs, True)
+               | otherwise                      -> raiseFailure "Unexpected token when parsing member access"
 
 parseBaseExpr :: ParseAction SyntaxNode
 parseBaseExpr = do
     lookahead <- peekToken
-    case () of _
-                | isIdentifier lookahead           -> parseId
-                | isConstant lookahead             -> parseConstant
-                | punctuationMatches "(" lookahead -> parseParenthesis
-                | otherwise                        -> raiseFailure "Unexpected type in base expression"
+    if | isIdentifier lookahead           -> parseId
+       | isConstant lookahead             -> parseConstant
+       | punctuationMatches "(" lookahead -> parseParenthesis
+       | otherwise                        -> raiseFailure "Unexpected type in base expression"
   where
-    parseId = do
-        id <- scanIdentifier
-        return $ IdentifierNode id
-    parseConstant = do 
-        const <- scanConstant
-        return $ LiteralNode const
+    parseId :: ParseAction SyntaxNode
+    parseId = IdentifierNode <$> scanIdentifier
+    parseConstant :: ParseAction SyntaxNode
+    parseConstant = LiteralNode <$> scanConstant 
+    parseParenthesis :: ParseAction SyntaxNode
     parseParenthesis = do
         eatPunctuation "("
         expr <- parseExpression
@@ -610,7 +603,7 @@ parseArraySpec = do
 parseType :: ParseAction DataType
 parseType = do
     typeName <- scanIdentifier
-    ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken >> return 0)
+    ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken $> 0)
     return (typeName, ptrLevels)
   
 
