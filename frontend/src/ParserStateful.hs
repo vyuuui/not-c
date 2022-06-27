@@ -27,22 +27,40 @@ getTypeEnv :: ParseAction TypeEnv
 getTypeEnv = typeEnv <$> get
 getLexerState :: ParseAction LexerState
 getLexerState = lexerState <$> get
+getSymbolMap :: ParseAction SymbolMap
+getSymbolMap = symbolMap <$> get
+
+pushSymbolEnv :: ParseAction ()
+pushSymbolEnv = do
+    ParseState lexer typeEnv funcs structs syms <- get
+    put $ ParseState lexer typeEnv funcs structs (M.empty:syms)
+
+popSymbolEnv :: ParseAction ()
+popSymbolEnv = do
+    ParseState lexer typeEnv funcs structs syms <- get
+    put $ ParseState lexer typeEnv funcs structs (tail syms)
+
+insertSymbol :: String -> SymbolType -> ParseAction ()
+insertSymbol symName sym = do
+    when (S.member symName baseTypes) (raiseFailure $ "Can't declare reserved typename " ++ symName)
+    ParseState lexer typeEnv funcs structs syms <- get
+    put $ ParseState lexer typeEnv funcs structs (M.insert symName sym (head syms) : tail syms)
 
 -- Lexes a new token, adding it to the LexerState
 -- Returns the newly lexed token
 lexNewToken :: ParseAction Token
 lexNewToken = do
-    ParseState (cacheTok, progStr) typeEnv funcs structs <- get
+    ParseState (cacheTok, progStr) typeEnv funcs structs syms <- get
     let (newTok, restProg) = lexStringSingle typeEnv progStr
-    put $ ParseState (cacheTok ++ [newTok], restProg) typeEnv funcs structs
+    put $ ParseState (cacheTok ++ [newTok], restProg) typeEnv funcs structs syms
     return newTok
 
 scanToken :: ParseAction Token
 scanToken = do
-    ParseState (cacheTok, progStr) typeEnv funcs structs <- get
+    ParseState (cacheTok, progStr) typeEnv funcs structs syms <- get
     case cacheTok of
         headTok:restTok -> do
-            put $ ParseState (restTok, progStr) typeEnv funcs structs
+            put $ ParseState (restTok, progStr) typeEnv funcs structs syms
             return headTok
         _               -> do
             lexNewToken
@@ -53,7 +71,7 @@ eatToken = void scanToken
 
 peekToken :: ParseAction Token
 peekToken = do
-    ParseState (cacheTok, progStr) _ _ _ <- get
+    ParseState (cacheTok, progStr) _ _ _ _ <- get
     case cacheTok of
         headTok:restTok -> do
             return headTok
@@ -61,7 +79,7 @@ peekToken = do
 
 peekTwoToken :: ParseAction (Token, Token)
 peekTwoToken = do
-    ParseState (cacheTok, progStr) _ _ _ <- get
+    ParseState (cacheTok, progStr) _ _ _ _ <- get
     case cacheTok of
         tok1:tok2:restTok -> return (tok1, tok2)
         [tok1]            -> do
@@ -146,48 +164,53 @@ parseTopLevel = do
     parseAndInsertFunction :: ParseAction ()
     parseAndInsertFunction = do
         func <- parseFunction
-        ParseState lexer env funcs structs <- get
-        put $ ParseState lexer env (funcs ++ [func]) structs
+        ParseState lexer env funcs structs syms <- get
+        put $ ParseState lexer env (funcs ++ [func]) structs syms
     parseAndInsertStruct :: ParseAction ()
     parseAndInsertStruct = do
         struct@(StructDefinition (name, _)) <- parseStruct
-        ParseState lexer env funcs structs <- get
-        put $ ParseState lexer (S.insert name env) funcs (structs ++ [struct])
+        ParseState lexer env funcs structs syms <- get
+        put $ ParseState lexer (S.insert name env) funcs (structs ++ [struct]) syms
 
 parseStruct :: ParseAction StructDefinition
 parseStruct = do
-    typeEnv <- getTypeEnv
+    syms <- getSymbolMap
     eatKeyword "struct"
     id <- scanIdentifier
+    insertSymbol id TypeSym
     eatPunctuation "{"
-    structMembers <- whileM (isTypeName typeEnv <$> peekToken) parseStructMember
+    structMembers <- whileM (isTypeName syms <$> peekToken) parseStructMember
     eatPunctuation "}"
     return $ StructDefinition (id, structMembers)
   where
     parseStructMember :: ParseAction (DataType, String)
     parseStructMember = do
-        memberType <- parseType
+        (memberTypeName, memberPtrList) <- parseType
         id <- scanIdentifier
+        arrayList <- parseArraySpec
         eatPunctuation ";"
-        return (memberType, id)
+        return ((memberTypeName, arrayList ++ memberPtrList), id)
 
 -- Return a parsed function as a SyntaxNode
 parseFunction :: ParseAction FunctionDefinition 
 parseFunction = do
     typeName <- parseType
     id <- scanIdentifier
+    insertSymbol id FuncSym 
+    pushSymbolEnv
     eatPunctuation "("
     paramList <- parseParamList
     eatPunctuation ")"
     blockNode <- parseBlock
+    popSymbolEnv
     return $ FunctionDefinition typeName id paramList blockNode
 
 
 parseParamList :: ParseAction ParameterList
 parseParamList = do
     typeToken <- peekToken
-    typeEnv <- getTypeEnv
-    if isTypeName typeEnv typeToken
+    syms <- getSymbolMap
+    if isTypeName syms typeToken
     then doActualParseParamList
       else return []
   where
@@ -210,7 +233,9 @@ parseParamList = do
 parseBlock :: ParseAction SyntaxNode
 parseBlock = do
     eatPunctuation "{"
+    pushSymbolEnv
     statementList <- whileM (peekToken >>= return . not . punctuationMatches "}") parseStatement 
+    popSymbolEnv
     eatPunctuation "}"
     return $ sequenceStatements statementList
   where
@@ -218,12 +243,10 @@ parseBlock = do
     sequenceStatements :: [SyntaxNode] -> SyntaxNode
     sequenceStatements = L.foldl' SeqNode EmptyNode
 
-isTypeName :: TypeEnv -> Token -> Bool
-isTypeName env (Identifier id) = S.member id env
-isTypeName _ _                 = False
+isTypeName :: SymbolMap -> Token -> Bool
+isTypeName smap (Identifier id) = getIdentifierType id smap == TypeSym
+isTypeName _ _                  = False
 -- For use to determine statement option, based on the START list for each
-isDecl :: TypeEnv -> Token -> Token -> Bool
-isDecl env la1 la2 = isTypeName env la1 && isIdentifier la2
 isBlock :: Token -> Bool
 isBlock = punctuationMatches "{"
 isExpression :: Token -> Bool
@@ -249,14 +272,12 @@ isBreak = controlMatches "break"
 
 parseStatement :: ParseAction SyntaxNode
 parseStatement = do
-    startState <- get
-    let dryRun = runStateT (parseDeclaration >> eatPunctuation ";") startState
-    if isRight dryRun
-      then do
-        node <- parseDeclaration
-        eatPunctuation ";"
-        return node
-      else getTypeEnv >>= \env -> peekToken >>= parseStatementLookahead env
+    tok <- peekToken
+    smap <- getSymbolMap
+    env <- getTypeEnv
+    if isTypeName smap tok
+        then parseDeclaration
+        else parseStatementLookahead env tok
   where
     parseStatementLookahead :: TypeEnv -> Token -> ParseAction SyntaxNode
     parseStatementLookahead env lookahead
@@ -310,14 +331,14 @@ parseWhileLoop = do
     return (WhileNode expressionNode block)
 
 parseForInit :: ParseAction SyntaxNode
-parseForInit = getTypeEnv >>= \env -> peekTwoToken >>= parseForInitLookahead env
+parseForInit = getSymbolMap >>= \syms -> peekToken >>= parseForInitLookahead syms
   where
-    parseForInitLookahead :: TypeEnv -> (Token, Token) -> ParseAction SyntaxNode
-    parseForInitLookahead env (lookahead1, lookahead2)
-        | isDecl env lookahead1 lookahead2  = parseDeclaration
-        | isExpression lookahead1           = parseExpression
-        | punctuationMatches ";" lookahead1 = return EmptyNode
-        | otherwise                         = raiseFailure "Unexpected token in for loop init"
+    parseForInitLookahead :: SymbolMap -> Token -> ParseAction SyntaxNode
+    parseForInitLookahead syms lookahead
+        | isTypeName syms lookahead        = parseDeclaration
+        | isExpression lookahead           = parseExpression
+        | punctuationMatches ";" lookahead = return EmptyNode
+        | otherwise                        = raiseFailure "Unexpected token in for loop init"
 
 parseForExpr :: ParseAction SyntaxNode
 parseForExpr = peekToken >>= parseForExprLookahead
@@ -331,6 +352,7 @@ parseForExpr = peekToken >>= parseForExprLookahead
 
 parseForLoop :: ParseAction SyntaxNode
 parseForLoop = do
+    pushSymbolEnv
     eatControl "for"
     eatPunctuation "("
     forInit <- parseForInit
@@ -340,19 +362,24 @@ parseForLoop = do
     forExpr <- parseForExpr
     eatPunctuation ")"
     block <- parseBlock
+    popSymbolEnv
     return $ ForNode forInit forCond forExpr block
 
 parseDeclaration :: ParseAction SyntaxNode
 parseDeclaration = do
-    typeName <- parseType
+    (typeName, ptrList) <- parseType
     id <- scanIdentifier
+    arrayList <- parseArraySpec
     nextTok <- peekToken
     case nextTok of
         Operator "=" -> do 
             eatToken
             expressionNode <- parseExpression
-            return (DefinitionNode typeName id expressionNode)
-        _ -> return (DeclarationNode typeName id)
+            insertSymbol id VarSym
+            return (DefinitionNode (typeName, arrayList ++ ptrList) id expressionNode)
+        _            -> do 
+            insertSymbol id VarSym
+            return (DeclarationNode (typeName, arrayList ++ ptrList) id)
 
 parseReturn :: ParseAction SyntaxNode
 parseReturn = do
@@ -565,12 +592,9 @@ parseArgList = do
             eatToken
             parseExpression
 
-parseType :: ParseAction DataType
-parseType = do
-    typeName <- scanIdentifier
-    ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken >> return 0)
-    arrLevels <- whileM (punctuationMatches "[" <$> peekToken) parseArrayDecl
-    return (typeName, reverse $ ptrLevels ++ arrLevels)
+parseArraySpec :: ParseAction [Int]
+parseArraySpec = do
+    whileM (punctuationMatches "[" <$> peekToken) parseArrayDecl
   where
     parseArrayDecl :: ParseAction Int
     parseArrayDecl = do
@@ -579,19 +603,27 @@ parseType = do
         case constant of
             IntConstant v -> do
                 eatPunctuation "]"
+                when (v <= 0) (raiseFailure "Array sizes must be greater than 0")
                 return (fromIntegral v)
             _             -> raiseFailure "Non-integer type used in array index"
+
+parseType :: ParseAction DataType
+parseType = do
+    typeName <- scanIdentifier
+    ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken >> return 0)
+    return (typeName, ptrLevels)
+  
 
 {-
 prog = toplevel
 toplevel = function | structdecl
 function = type identifier '(' paramlist ')' block
 structdecl = 'struct' identifier '{' member* '}'
-member = type identifier ';'
+member = type identifier arrayspec ';'
 paramlist = type identifier (',' type identifier)* | ε
 block = '{' stmt* '}'
 stmt = declaration ';' | block | expression ';' | conditional | forloop | whileloop | ret ';' | 'continue' ';' | 'break' ';'
-declaration = type identifier optassign
+declaration = type identifier arrayspec optassign
 optassign = '=' expression | ε
 whileloop = 'while' '(' expression ')' block
 forinit = declaration | assignment | ε
@@ -618,7 +650,8 @@ memberaccess = '.' identifier ('[' expression ']')*
 baseexpr = identifier | constant | '(' expression ')'
 arglist = expression (',' expression)* | ε
 type = identifier qualifier
-qualifier = '*'* '[' constant ']'*
+qualifier = '*'*
+arrayspec = '[' constant ']'*
 constant = 'true' | 'false' | number
 number = -?[0-9]+\.[0-9]*
 identifier = [A-Za-z][A-Za-z0-9_]*

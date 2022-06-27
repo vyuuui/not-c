@@ -6,8 +6,8 @@ bool test(int* out) {
 short main() {
     int x = 0;
     x += 1;
-    int*[10] a;
-    char[4] str;
+    int* a[10];
+    char str[4];
     str = "test";
     
     int* y = &x;

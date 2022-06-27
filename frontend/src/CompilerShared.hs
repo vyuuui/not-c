@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 module CompilerShared where
 
 import qualified Data.Map as M
@@ -33,19 +34,27 @@ isBaseType :: DataType -> Bool
 isBaseType (name, _) = S.member name baseTypes
 
 initialState :: String -> ParseState
-initialState progStr = ParseState ([], progStr) baseTypes [] []
+initialState progStr = ParseState ([], progStr) baseTypes [] [] [M.fromList (map (, TypeSym) $ S.toList baseTypes)]
+
+getIdentifierType :: String -> SymbolMap -> SymbolType
+getIdentifierType _ []          = UnkSym
+getIdentifierType id (map:rest) = if M.member id map then map M.! id else getIdentifierType id rest
+
+data SymbolType = FuncSym | TypeSym | VarSym | UnkSym deriving (Show, Eq)
+type SymbolMap = [M.Map String SymbolType]
 
 data ParseState = ParseState
     { lexerState :: LexerState
-    , typeEnv :: TypeEnv
+    , typeEnv :: TypeEnv  -- List of all valid types
     , funcList :: [FunctionDefinition]
     , structList :: [StructDefinition]
+    , symbolMap :: SymbolMap  -- List of all taken symbol names + kind
     }
     deriving Show
 
 popToken :: ParseState -> (Token, ParseState)
-popToken (ParseState (h:t, rest) env funcs structs) = (h, ParseState (t, rest) env funcs structs)
-popToken (ParseState ([], rest) env funcs structs) = error "popToken called on empty token list"
+popToken (ParseState (h:t, rest) env funcs structs syms) = (h, ParseState (t, rest) env funcs structs syms)
+popToken (ParseState ([], rest) env funcs structs syms) = error "popToken called on empty token list"
 
 data ConstantType
     = IntConstant Int
@@ -113,6 +122,10 @@ keywordMatches :: String -> Token -> Bool
 keywordMatches v (Keyword k) = v == k
 keywordMatches _ _           = False
 
+isEmptyNode :: SyntaxNode -> Bool
+isEmptyNode EmptyNode = True
+isEmptyNode _         = False
+
 data SyntaxNode
     = EmptyNode
     -- Two sequential operations
@@ -138,6 +151,7 @@ data SyntaxNode
     | UnaryOpNode UnaryOp SyntaxNode
     | AssignmentNode SyntaxNode AssignmentOp SyntaxNode
     | MemberAccessNode Bool SyntaxNode SyntaxNode
+    | CastNode SyntaxNode DataType
     deriving Show
 
 data BinaryOp
