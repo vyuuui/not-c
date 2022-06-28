@@ -272,25 +272,25 @@ validateArrayIndexing arr idx = do
 validateMemberAccess :: SyntaxNode -> [(DataType, String)] -> GeneratorAction SyntaxNode
 validateMemberAccess (MemberAccessNode isPtr lhs rhs) _ = do
     lhsType@(lhsName, _) <- decltype lhs
-    nlhs <- validateSyntaxNode lhs
+    lhs <- validateSyntaxNode lhs
     unlessM (get <&> isStructType lhsType . structMap) (raiseFailure "Tried to access member of non-struct type")
     unless (isPtr == isPointerType lhsType) (raiseFailure "Tried to access member of non-pointer type")
     structs <- structMap <$> get
     let structMembers = M.lookup lhsName structs
-    nrhs <- maybe
+    rhs <- maybe
       (raiseFailure $ "Struct type " ++ lhsName ++ " not declared")
       (\(StructDefinition v) -> validateMemberAccess rhs $ snd v)
       structMembers
-    return $ MemberAccessNode isPtr nlhs nrhs
+    return $ MemberAccessNode isPtr lhs rhs
 validateMemberAccess (IdentifierNode id) memberList = do
     unless
       (any (\x -> snd x == id) memberList)
       (raiseFailure $ "Could not find member variable " ++ id)
     return $ IdentifierNode id
 validateMemberAccess (ArrayIndexNode arr idx) memberList = do
-    nidx <- validateSyntaxNode idx
-    narr <- validateMemberAccess arr memberList
-    return $ ArrayIndexNode narr nidx
+    idx <- validateSyntaxNode idx
+    arr <- validateMemberAccess arr memberList
+    return $ ArrayIndexNode arr idx
 
 validateSyntaxNode :: SyntaxNode -> GeneratorAction SyntaxNode
 validateSyntaxNode statement = case statement of
@@ -305,19 +305,19 @@ validateSyntaxNode statement = case statement of
             Right varInfo -> return statement
     ParenthesisNode sub -> validateSyntaxNode sub
     BinaryOpNode op lhs rhs -> do
-        nlhs <- validateSyntaxNode lhs
-        nrhs <- validateSyntaxNode rhs
-        (nlhs2, nrhs2) <- validateBinaryOp op nlhs nrhs
-        return $ BinaryOpNode op nlhs2 nrhs2
+        lhs <- validateSyntaxNode lhs
+        rhs <- validateSyntaxNode rhs
+        (lhs, rhs) <- validateBinaryOp op lhs rhs
+        return $ BinaryOpNode op lhs rhs
     UnaryOpNode op sub -> do
-        nsub <- validateSyntaxNode sub
-        validateUnaryOp op nsub
-        return $ UnaryOpNode op nsub
+        sub <- validateSyntaxNode sub
+        validateUnaryOp op sub
+        return $ UnaryOpNode op sub
     ArrayIndexNode arr idx -> do
-        narr <- validateSyntaxNode arr
-        nidx <- validateSyntaxNode idx
-        validateArrayIndexing narr nidx
-        return $ ArrayIndexNode narr nidx
+        arr <- validateSyntaxNode arr
+        idx <- validateSyntaxNode idx
+        validateArrayIndexing arr idx
+        return $ ArrayIndexNode arr idx
     AssignmentNode lhs op rhs -> do
         lhs <- validateSyntaxNode lhs
         rhs <- validateSyntaxNode rhs
@@ -349,7 +349,7 @@ validateSyntaxNode statement = case statement of
         return $ WhileNode condition block
     ForNode init condition expr block -> do 
         pushEnvironment True
-        ninit <- validateSyntaxNode init
+        init <- validateSyntaxNode init
         condition <- validateSyntaxNode condition
         condType <- decltype condition
         let condTypeName = showDt condType
