@@ -1,6 +1,7 @@
 module Generator where
 
 import Parser
+import Validator
 import CompilerShared
 import Control.Monad
 import Control.Monad.Trans
@@ -18,18 +19,21 @@ data DNAType
     | InvalidType
     deriving (Eq, Ord, Show)
 
-data ImmInner = Integral Int | Floating Float deriving Show
-
 data DNAVariable 
     = Temp String DNAType
     | Input String DNAType
     | Local String DNAType
     deriving Show
 
+opVarRef :: DNAVariable -> DNAOperand
+opVarRef = Variable True
+opVar :: DNAVariable -> DNAOperand
+opVar = Variable False
+
 data DNAOperand
-    = Variable DNAVariable
-    | MemoryRef DNAVariable Bool Int DNAType
-    | Immediate ImmInner DNAType
+    = Variable Bool DNAVariable
+    | MemoryRef Bool DNAVariable Int DNAType
+    | Immediate Rational DNAType
     | None
     deriving Show
 
@@ -94,7 +98,9 @@ parseDNAType typename
     | otherwise           = const InvalidType
 
 getOperandType :: DNAOperand -> DNAType
-getOperandType (Variable var) = getOperandVar var
+getOperandType (Variable isPtr var)
+    | isPtr     = Int64 1
+    | otherwise = getOperandVar var
   where
     getOperandVar (Temp _ tp)  = tp
     getOperandVar (Input _ tp) = tp
@@ -155,6 +161,12 @@ freeTempVar var = do
         freeList <- M.lookup varType tmpMap
         return $ M.insert varType (var:freeList) tmpMap
 
+tryFreeOperand :: DNAOperand -> GeneratorAction ()
+tryFreeOperand (Variable _ var) = case var of
+    Temp _ _ -> freeTempVar var
+--tryFreeOperand MemoryRef DNAVariable Bool Int DNAType
+tryFreeOperand _ = return ()
+
 createLabel :: GeneratorAction DNAInstruction
 createLabel = do
     GeneratorState ctr temps env <- get
@@ -168,11 +180,11 @@ generateIr (IfNode condition block) = do
     (bodyBlock, _) <- generateIr block
     afterLbl <- createLabel
     let newBlock = (conditionBlock
-                ++ [Cmp resultOp (Immediate (Integral 0) (Int8 1)),
+                ++ [Cmp resultOp (Immediate 0 (Int8 1)),
                     Jmp Eq afterLbl]
                 ++  bodyBlock
                 ++ [afterLbl], None)
-    --freeTempVar resultOp -- fix me!!!!! andrew
+    tryFreeOperand resultOp
     return newBlock
 generateIr (IfElseNode condition trueBody falseBody) = do
     (conditionBlock, resultOp) <- generateIr condition
@@ -181,17 +193,18 @@ generateIr (IfElseNode condition trueBody falseBody) = do
     afterLbl <- createLabel
     elseLbl <- createLabel
     let newBlock = (conditionBlock
-                ++ [Cmp resultOp (Immediate (Integral 0) (Int8 1)),
+                ++ [Cmp resultOp (Immediate 0 (Int8 1)),
                     Jmp Eq elseLbl]
                 ++  trueBlock
                 ++ [Jmp Always afterLbl]
                 ++ [elseLbl]
                 ++ falseBlock
                 ++ [afterLbl], None)
-    --freeTempVar resultOp
+    tryFreeOperand resultOp
     return newBlock
 generateIr (ReturnNode expr) = do
     (exprBlock, resultOp) <- generateIr expr
+    tryFreeOperand resultOp
     if isEmptyNode expr
         then return ([ReturnVoid], None)
         else return (exprBlock ++ [ReturnVal resultOp], None)
@@ -207,12 +220,12 @@ generateIr (WhileNode cond body) = do
     condLbl <- createLabel
     let newBlock = ([condLbl]
                  ++ conditionBlock
-                 ++ [Cmp resultOp (Immediate (Integral 0) (Int8 1)),
+                 ++ [Cmp resultOp (Immediate 0 (Int8 1)),
                     Jmp Eq afterLbl]
                  ++ bodyBlock
                  ++ [Jmp Always condLbl]
                  ++ [afterLbl], None)
-    -- freeTempVar resultOp
+    tryFreeOperand resultOp
     return newBlock
 generateIr (DeclarationNode datatype id) = do
     localEnv <- env <$> get
@@ -223,18 +236,223 @@ generateIr (DeclarationNode datatype id) = do
 generateIr (BinaryOpNode Addition left right) = do
     (leftBlock, resultOp) <- generateIr left
     (rightBlock, resultOp2) <- generateIr right
-    let additionType = getOperandType resultOp
-    sum <- getTempVar additionType
+    let sumType = getOperandType resultOp
+    sum <- getTempVar sumType
     let newBlock = (leftBlock
                 ++  rightBlock
-                ++ [Add (Variable sum) resultOp resultOp2], Variable sum)
+                ++ [Add (opVar sum) resultOp resultOp2], opVar sum)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
     return newBlock
 generateIr (BinaryOpNode Subtraction left right) = do
     (leftBlock, resultOp) <- generateIr left
     (rightBlock, resultOp2) <- generateIr right
-    let additionType = getOperandType resultOp
-    sum <- getTempVar additionType
+    let diffType = getOperandType resultOp
+    diff <- getTempVar diffType
     let newBlock = (leftBlock
                 ++  rightBlock
-                ++ [Sub (Variable sum) resultOp resultOp2], Variable sum)
+                ++ [Sub (opVar diff) resultOp resultOp2], opVar diff)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
     return newBlock
+generateIr (BinaryOpNode Multiplication left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    let prodType = getOperandType resultOp
+    prod <- getTempVar prodType
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mul (opVar prod) resultOp resultOp2], opVar prod)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode Division  left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    let quotType = getOperandType resultOp
+    quot <- getTempVar quotType
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Div (opVar quot) resultOp resultOp2], opVar quot)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode Modulus left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    let modType = getOperandType resultOp
+    mod <- getTempVar modType
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mod (opVar mod) resultOp resultOp2], opVar mod)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode Equal left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    equals <- getTempVar (Int8 1)
+    equalLabel <- createLabel
+    let eqVar = opVar equals
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mov eqVar (Immediate 1 (Int8 1))]
+                ++ [Cmp resultOp resultOp2]
+                ++ [Jmp Eq equalLabel]
+                ++ [Mov eqVar (Immediate 0 (Int8 1))]
+                ++ [equalLabel], eqVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode NotEqual left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    notEquals <- getTempVar (Int8 1)
+    equalLabel <- createLabel
+    let neVar = opVar notEquals
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mov neVar (Immediate 0 (Int8 1))]
+                ++ [Cmp resultOp resultOp2]
+                ++ [Jmp Eq equalLabel]
+                ++ [Mov neVar (Immediate 1 (Int8 1))]
+                ++ [equalLabel], neVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode LessThan left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    lessThan <- getTempVar (Int8 1)
+    lessThanLabel <- createLabel
+    let ltVar = opVar lessThan
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mov ltVar (Immediate 1 (Int8 1))]
+                ++ [Cmp resultOp resultOp2]
+                ++ [Jmp Lt lessThanLabel]
+                ++ [Mov ltVar (Immediate 0 (Int8 1))]
+                ++ [lessThanLabel], ltVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode GreaterThanOrEqual left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    lessThan <- getTempVar (Int8 1)
+    lessThanLabel <- createLabel
+    let ltVar = opVar lessThan
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mov ltVar (Immediate 0 (Int8 1))]
+                ++ [Cmp resultOp resultOp2]
+                ++ [Jmp Lt lessThanLabel]
+                ++ [Mov ltVar (Immediate 1 (Int8 1))]
+                ++ [lessThanLabel], ltVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode GreaterThan left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    greaterThan <- getTempVar (Int8 1)
+    greaterThanLabel <- createLabel
+    let gtVar = opVar greaterThan
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mov gtVar (Immediate 1 (Int8 1))]
+                ++ [Cmp resultOp resultOp2]
+                ++ [Jmp Gt greaterThanLabel]
+                ++ [Mov gtVar (Immediate 0 (Int8 1))]
+                ++ [greaterThanLabel], gtVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode LessThanOrEqual left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    greaterThan <- getTempVar (Int8 1)
+    greaterThanLabel <- createLabel
+    let gtVar = opVar greaterThan
+    let newBlock = (leftBlock
+                ++  rightBlock
+                ++ [Mov gtVar (Immediate 0 (Int8 1))]
+                ++ [Cmp resultOp resultOp2]
+                ++ [Jmp Gt greaterThanLabel]
+                ++ [Mov gtVar (Immediate 1 (Int8 1))]
+                ++ [greaterThanLabel], gtVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode Or left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    result <- getTempVar (Int8 1)
+    shortCircuit <- createLabel
+    let resVar = opVar result
+    let newBlock = (leftBlock
+                ++ [Mov resVar resultOp]
+                ++ [Cmp resultOp (Immediate 1 (Int8 1))]
+                ++ [Jmp Eq shortCircuit]
+                ++ rightBlock
+                ++ [Mov resVar resultOp2]
+                ++ [shortCircuit], resVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (BinaryOpNode And left right) = do
+    (leftBlock, resultOp) <- generateIr left
+    (rightBlock, resultOp2) <- generateIr right
+    result <- getTempVar (Int8 1)
+    shortCircuit <- createLabel
+    let resVar = opVar result
+    let newBlock = (leftBlock
+                ++ [Mov resVar resultOp]
+                ++ [Cmp resultOp (Immediate 0 (Int8 1))]
+                ++ [Jmp Eq shortCircuit]
+                ++ rightBlock
+                ++ [Mov resVar resultOp2]
+                ++ [shortCircuit], resVar)
+    tryFreeOperand resultOp
+    tryFreeOperand resultOp2
+    return newBlock
+generateIr (UnaryOpNode Negate expr) = do
+    (subBlock, resultOp) <- generateIr expr
+    let negType = getOperandType resultOp
+    negation <- getTempVar negType
+    let negVar = opVar negation
+    let newBlock = (subBlock
+                ++ [Sub negVar (Immediate 0 negType) resultOp], negVar)
+    tryFreeOperand resultOp
+    return newBlock
+generateIr (UnaryOpNode Not expr) = do
+    (notBlock, resultOp) <- generateIr expr
+    _not <- getTempVar (Int8 1)
+    let notVar = opVar _not
+    let newBlock = (notBlock
+                ++ [Sub notVar (Immediate 1 (Int8 1)) resultOp], notVar)
+    tryFreeOperand resultOp
+    return newBlock
+generateIr (UnaryOpNode Reference expr) = do
+    (refBlock, resultOp) <- generateIr expr
+    let refTo = case resultOp of
+                Variable _ dnaVar -> opVarRef dnaVar
+                _                 -> error "Validator broken :("
+    return ([], refTo)
+generateIr node@(UnaryOpNode Dereference expr) = do
+    -- Compute expr
+    -- move result into a  temp
+    -- return a dereference of the temp
+    (derefBlock, resultOp) <- generateIr expr
+    ptr <- getTempVar (Int64 1)
+    resultType <- decltype node
+    let ptrDeref = MemoryRef False ptr 0 ?????????????????????????????1
+    let newBlock = (derefBlock
+                ++ [Mov (Variable False ptr) resultOp], ptrDeref)
+    return newBlock
+-- float*** x;
+-- ***x; // float
+-- Unary deref (Unary deref (Unary deref (Identifier x)))
+-- mov t0, [x]::int64
+-- mov t1, [t0]::int64
+-- mov t2, [t1]::float

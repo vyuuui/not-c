@@ -1,4 +1,4 @@
-module Validator ( validateProgram ) where
+module Validator ( validateProgram, decltype ) where
 
 import qualified Data.Set as S
 import qualified Data.Map as M
@@ -202,7 +202,7 @@ validateAssignOp op lhs rhs = case op of
     MinusEq -> validateBinaryOp Subtraction lhs rhs
     MulEq   -> validateBinaryOp Multiplication lhs rhs
     DivEq   -> validateBinaryOp Division lhs rhs
-    ModEq   -> validateBinaryOp Mod lhs rhs
+    ModEq   -> validateBinaryOp Modulus lhs rhs
 
 validateBinaryOp :: BinaryOp -> SyntaxNode -> SyntaxNode -> GeneratorAction (SyntaxNode, SyntaxNode)
 validateBinaryOp op lhs rhs = do
@@ -227,7 +227,7 @@ validateBinaryOp op lhs rhs = do
         | op == Multiplication     = isImplicitCastAllowed lhsType rhsType
         | op == Subtraction        = isImplicitCastAllowed lhsType rhsType || isPointerArithmetic op lhsType rhsType
         | op == Division           = isImplicitCastAllowed lhsType rhsType
-        | op == Mod                = isIntegralType lhsType && isIntegralType rhsType
+        | op == Modulus            = isIntegralType lhsType && isIntegralType rhsType
         | op == Equal              = isImplicitCastAllowed lhsType rhsType
         | op == NotEqual           = isImplicitCastAllowed lhsType rhsType
         | op == LessThan           = isImplicitCastAllowed lhsType rhsType
@@ -465,7 +465,7 @@ binaryTypeResult op lhsType rhsType
     | op == Multiplication     = decideMultiplication lhsType rhsType
     | op == Subtraction        = decideSubtraction lhsType rhsType
     | op == Division           = decideDivision lhsType rhsType
-    | op == Mod                = return $ largestType lhsType rhsType
+    | op == Modulus            = return $ largestType lhsType rhsType
     | op == Equal              = return ("bool", [])
     | op == NotEqual           = return ("bool", [])
     | op == LessThan           = return ("bool", [])

@@ -480,7 +480,7 @@ parseAddition = parseOpPrecedence parseMultiplication [("+", BinaryOpNode Additi
 parseMultiplication :: ParseAction SyntaxNode
 parseMultiplication = parseOpPrecedence parseUnary [("*", BinaryOpNode Multiplication),
                                                     ("/", BinaryOpNode Division),
-                                                    ("%", BinaryOpNode Mod)]
+                                                    ("%", BinaryOpNode Modulus)]
 
 parseUnary :: ParseAction SyntaxNode
 parseUnary = do

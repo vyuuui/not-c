@@ -159,7 +159,7 @@ data BinaryOp
     | Multiplication
     | Subtraction
     | Division
-    | Mod
+    | Modulus
     | Equal
     | NotEqual
     | LessThan
