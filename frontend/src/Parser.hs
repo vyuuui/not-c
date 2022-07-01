@@ -242,7 +242,7 @@ parseBlock = do
   where
     -- foldl ensures that sequence nodes are built in forward order
     sequenceStatements :: [SyntaxNode] -> SyntaxNode
-    sequenceStatements = L.foldl' SeqNode EmptyNode
+    sequenceStatements = L.foldl' (\x a -> annotSyntaxEmpty $ SeqNode x a) (annotSyntaxEmpty EmptyNode)
 
 isTypeName :: SymbolMap -> Token -> Bool
 isTypeName smap (Identifier id) = getIdentifierType id smap == TypeSym
@@ -284,7 +284,7 @@ parseStatement = do
     parseStatementLookahead env lookahead
         | isBlock lookahead       = parseBlock
         | isExpression lookahead  = do
-            node <- parseExpression
+            node <- parseWrapExpression
             eatPunctuation ";"
             return node
         | isConditional lookahead = parseCondition
@@ -296,22 +296,22 @@ parseStatement = do
             return node
         | isEmpty lookahead       = do
             eatPunctuation ";"
-            return EmptyNode
+            return $ annotSyntaxEmpty EmptyNode
         | isContinue lookahead    = do
             eatControl "continue"
             eatPunctuation ";"
-            return ContinueNode
+            return $ annotSyntaxEmpty ContinueNode
         | isBreak lookahead       = do
             eatControl "break"
             eatPunctuation ";"
-            return BreakNode
+            return $ annotSyntaxEmpty BreakNode
         | otherwise               = raiseFailure "Unexpected token when parsing statement"
 
 parseCondition :: ParseAction SyntaxNode
 parseCondition = do
     eatControl "if"
     eatPunctuation "("
-    expressionNode <- parseExpression
+    expressionNode <- parseWrapExpression
     eatPunctuation ")"
     block <- parseBlock
     maybeElse <- peekToken
@@ -319,17 +319,17 @@ parseCondition = do
         then do
             eatControl "else"
             elseBlock <- parseBlock
-            return $ IfElseNode expressionNode block elseBlock
-        else return $ IfNode expressionNode block
+            return $ annotSyntaxEmpty $ IfElseNode expressionNode block elseBlock
+        else return $ annotSyntaxEmpty $ IfNode expressionNode block
 
 parseWhileLoop :: ParseAction SyntaxNode
 parseWhileLoop = do
     eatControl "while"
     eatPunctuation "("
-    expressionNode <- parseExpression
+    expressionNode <- parseWrapExpression
     eatPunctuation ")"
     block <- parseBlock
-    return (WhileNode expressionNode block)
+    return $ annotSyntaxEmpty $ WhileNode expressionNode block
 
 parseForInit :: ParseAction SyntaxNode
 parseForInit = getSymbolMap >>= \syms -> peekToken >>= parseForInitLookahead syms
@@ -337,8 +337,8 @@ parseForInit = getSymbolMap >>= \syms -> peekToken >>= parseForInitLookahead sym
     parseForInitLookahead :: SymbolMap -> Token -> ParseAction SyntaxNode
     parseForInitLookahead syms lookahead
         | isTypeName syms lookahead        = parseDeclaration
-        | isExpression lookahead           = parseExpression
-        | punctuationMatches ";" lookahead = return EmptyNode
+        | isExpression lookahead           = parseWrapExpression
+        | punctuationMatches ";" lookahead = return $ annotSyntaxEmpty EmptyNode
         | otherwise                        = raiseFailure "Unexpected token in for loop init"
 
 parseForExpr :: ParseAction SyntaxNode
@@ -346,9 +346,9 @@ parseForExpr = peekToken >>= parseForExprLookahead
   where
     parseForExprLookahead :: Token -> ParseAction SyntaxNode
     parseForExprLookahead lookahead
-        | isExpression lookahead           = parseExpression
+        | isExpression lookahead           = parseWrapExpression
         | punctuationMatches ";" lookahead ||
-          punctuationMatches ")" lookahead = return EmptyNode
+          punctuationMatches ")" lookahead = return $ annotSyntaxEmpty EmptyNode
         | otherwise                        = raiseFailure "Unexpected token in for loop expression"
 
 parseForLoop :: ParseAction SyntaxNode
@@ -364,7 +364,7 @@ parseForLoop = do
     eatPunctuation ")"
     block <- parseBlock
     popSymbolEnv
-    return $ ForNode forInit forCond forExpr block
+    return $ annotSyntaxEmpty $ ForNode forInit forCond forExpr block
 
 parseDeclaration :: ParseAction SyntaxNode
 parseDeclaration = do
@@ -375,20 +375,23 @@ parseDeclaration = do
     case nextTok of
         Operator "=" -> do 
             eatToken
-            expressionNode <- parseExpression
+            expressionNode <- parseWrapExpression
             insertSymbol id VarSym
-            return (DefinitionNode (typeName, arrayList ++ ptrList) id expressionNode)
+            return $ annotSyntaxEmpty (DefinitionNode (typeName, arrayList ++ ptrList) id expressionNode)
         _            -> do 
             insertSymbol id VarSym
-            return (DeclarationNode (typeName, arrayList ++ ptrList) id)
+            return $ annotSyntaxEmpty (DeclarationNode (typeName, arrayList ++ ptrList) id)
 
 parseReturn :: ParseAction SyntaxNode
 parseReturn = do
     eatControl "return"
-    expressionNode <- parseExpression
-    return $ ReturnNode expressionNode
+    expressionNode <- parseWrapExpression
+    return $ annotSyntaxEmpty $ ReturnNode expressionNode
 
-parseExpression :: ParseAction SyntaxNode
+parseWrapExpression :: ParseAction SyntaxNode
+parseWrapExpression = annotSyntaxEmpty . ExprNode <$> parseAssignment
+
+parseExpression :: ParseAction Expr
 parseExpression = parseAssignment
     
 assignOpsList :: S.Set String
@@ -401,7 +404,7 @@ isAssignmentOperator _             = False
 scanAssignmentOperator :: ParseAction ()
 scanAssignmentOperator = scanToken >>= \x -> unless (isAssignmentOperator x) (raiseFailure "Expected assignment token operator")
 
-parseAssignment :: ParseAction SyntaxNode
+parseAssignment :: ParseAction Expr
 parseAssignment = do
     startState <- get
     let dryRun = runStateT (parseLvalue >> scanAssignmentOperator) startState
@@ -410,7 +413,7 @@ parseAssignment = do
         lhs <- parseLvalue
         assignOp <- scanToken
         subExpr <- parseAssignment
-        return $ AssignmentNode lhs (getAssignOp assignOp) subExpr
+        return $ annotExprEmpty $ AssignmentNode (getAssignOp assignOp) lhs subExpr
       else parseLogicOr
   where
     getAssignOp (Operator o)
@@ -423,23 +426,23 @@ parseAssignment = do
         | otherwise = error "getAssignOp should never receive an invalid assign operator"
     getAssignOp _ = error "getAssignOp should never receive an invalid assign operator"
 
-parseLvalue :: ParseAction SyntaxNode
+parseLvalue :: ParseAction Expr
 parseLvalue = do
     token <- peekToken
     if operatorMatches "*" token
     then do
         eatToken
         indirectionNode <- parseLvalue
-        return (UnaryOpNode Dereference indirectionNode)
+        return $ annotExprEmpty (UnaryOpNode Dereference indirectionNode)
     else
         parseIndirection
 
-type BinaryNodeCombinator = SyntaxNode -> SyntaxNode -> SyntaxNode
+type BinaryNodeCombinator = Expr -> Expr -> Expr
 
 parseOpPrecedence
-    :: ParseAction SyntaxNode -- Subexpr parser action
+    :: ParseAction Expr -- Subexpr parser action
     -> [(String, BinaryNodeCombinator)] -- (Operator, combinator) pairs
-    -> ParseAction SyntaxNode -- Root node
+    -> ParseAction Expr -- Root node
 parseOpPrecedence parseAction opCombine = do
     init <- parseAction
     equalPrecedenceList <- whileM shouldContinue execMatched
@@ -450,105 +453,105 @@ parseOpPrecedence parseAction opCombine = do
     shouldContinue = do
         nextTok <- peekToken
         return $ any (($ nextTok) . fst) checks
-    execMatched :: ParseAction (SyntaxNode, BinaryNodeCombinator)
+    execMatched :: ParseAction (Expr, BinaryNodeCombinator)
     execMatched = do
         nextTok <- scanToken
         let combineFn = snd $ head $ filter (($ nextTok) . fst) checks
         nextExpr <- parseAction
         return (nextExpr, combineFn) 
 
-parseLogicOr :: ParseAction SyntaxNode
-parseLogicOr = parseOpPrecedence parseLogicAnd [("||", BinaryOpNode Or)]
+parseLogicOr :: ParseAction Expr
+parseLogicOr = parseOpPrecedence parseLogicAnd [("||", \lhs rhs -> annotExprEmpty $ BinaryOpNode Or lhs rhs)]
 
-parseLogicAnd :: ParseAction SyntaxNode
-parseLogicAnd = parseOpPrecedence parseEqComp [("&&", BinaryOpNode And)]
+parseLogicAnd :: ParseAction Expr
+parseLogicAnd = parseOpPrecedence parseEqComp [("&&", \lhs rhs -> annotExprEmpty $ BinaryOpNode And lhs rhs)]
 
-parseEqComp :: ParseAction SyntaxNode
-parseEqComp = parseOpPrecedence parseOrdComp [("==", BinaryOpNode Equal),
-                                              ("!=", BinaryOpNode NotEqual)]
+parseEqComp :: ParseAction Expr
+parseEqComp = parseOpPrecedence parseOrdComp [("==", \lhs rhs -> annotExprEmpty $ BinaryOpNode Equal lhs rhs),
+                                              ("!=", \lhs rhs -> annotExprEmpty $ BinaryOpNode NotEqual lhs rhs)]
 
-parseOrdComp :: ParseAction SyntaxNode
-parseOrdComp = parseOpPrecedence parseAddition [(">", BinaryOpNode GreaterThan),
-                                                ("<", BinaryOpNode LessThan),
-                                                (">=", BinaryOpNode GreaterThanOrEqual),
-                                                ("<=", BinaryOpNode LessThanOrEqual)]
+parseOrdComp :: ParseAction Expr
+parseOrdComp = parseOpPrecedence parseAddition [(">", \lhs rhs -> annotExprEmpty $ BinaryOpNode GreaterThan lhs rhs),
+                                                ("<", \lhs rhs -> annotExprEmpty $ BinaryOpNode LessThan lhs rhs),
+                                                (">=", \lhs rhs -> annotExprEmpty $ BinaryOpNode GreaterThanOrEqual lhs rhs),
+                                                ("<=", \lhs rhs -> annotExprEmpty $ BinaryOpNode LessThanOrEqual lhs rhs)]
 
-parseAddition :: ParseAction SyntaxNode
-parseAddition = parseOpPrecedence parseMultiplication [("+", BinaryOpNode Addition),
-                                                       ("-", BinaryOpNode Subtraction)]
+parseAddition :: ParseAction Expr
+parseAddition = parseOpPrecedence parseMultiplication [("+", \lhs rhs -> annotExprEmpty $ BinaryOpNode Addition lhs rhs),
+                                                       ("-", \lhs rhs -> annotExprEmpty $ BinaryOpNode Subtraction lhs rhs)]
 
-parseMultiplication :: ParseAction SyntaxNode
-parseMultiplication = parseOpPrecedence parseUnary [("*", BinaryOpNode Multiplication),
-                                                    ("/", BinaryOpNode Division),
-                                                    ("%", BinaryOpNode Modulus)]
+parseMultiplication :: ParseAction Expr
+parseMultiplication = parseOpPrecedence parseUnary [("*", \lhs rhs -> annotExprEmpty $ BinaryOpNode Multiplication lhs rhs),
+                                                    ("/", \lhs rhs -> annotExprEmpty $ BinaryOpNode Division lhs rhs),
+                                                    ("%", \lhs rhs -> annotExprEmpty $ BinaryOpNode Modulus lhs rhs)]
 
-parseUnary :: ParseAction SyntaxNode
+parseUnary :: ParseAction Expr
 parseUnary = do
     maybeOp <- peekToken
     if | operatorMatches "-" maybeOp -> do
              eatToken
-             UnaryOpNode Negate <$> parseUnary
+             annotExprEmpty . UnaryOpNode Negate <$> parseUnary
        | operatorMatches "!" maybeOp -> do
              eatToken
-             UnaryOpNode Not <$> parseUnary
+             annotExprEmpty . UnaryOpNode Not <$> parseUnary
        | operatorMatches "&" maybeOp -> do
              eatToken
-             UnaryOpNode Reference <$> parseUnary
+             annotExprEmpty . UnaryOpNode Reference <$> parseUnary
        | operatorMatches "*" maybeOp -> do
              eatToken
-             UnaryOpNode Dereference <$> parseUnary
+             annotExprEmpty . UnaryOpNode Dereference <$> parseUnary
        | otherwise -> parseIndirection
 
-parseIndirection :: ParseAction SyntaxNode
+parseIndirection :: ParseAction Expr
 parseIndirection = do
     (lookahead, lookahead2) <- peekTwoToken
     if isIdentifier lookahead && punctuationMatches "(" lookahead2
       then parseCall >>= tryParseArray >>= tryParseMemberAccess
       else parseBaseExpr >>= tryParseArray >>= tryParseMemberAccess
   where
-    parseCall :: ParseAction SyntaxNode
+    parseCall :: ParseAction Expr
     parseCall = do
         id <- scanIdentifier
         eatPunctuation "("
         argList <- parseArgList
         eatPunctuation ")"
-        return $ FunctionCallNode id argList
-    tryParseArray :: SyntaxNode -> ParseAction SyntaxNode
+        return $ annotExprEmpty $ FunctionCallNode id argList
+    tryParseArray :: Expr -> ParseAction Expr
     tryParseArray node = do
         arrayIdxs <- whileM (punctuationMatches "[" <$> peekToken) parseArrayIndex 
-        return $ L.foldl' ArrayIndexNode node arrayIdxs
+        return $ L.foldl' (\x a -> annotExprEmpty $ ArrayIndexNode x a) node arrayIdxs
       where
         -- Parses a single ", typename identifier"
-        parseArrayIndex :: ParseAction SyntaxNode
+        parseArrayIndex :: ParseAction Expr
         parseArrayIndex = do
             eatPunctuation "["
             arrayIdx <- parseExpression
             eatPunctuation "]"
             return arrayIdx
-    tryParseMemberAccess :: SyntaxNode -> ParseAction SyntaxNode
+    tryParseMemberAccess :: Expr -> ParseAction Expr
     tryParseMemberAccess node = do
         memberAccesses <- whileM (continueParsingMembers <$> peekToken) parseMemberAccess 
         return $ L.foldl' foldMemberAccess node memberAccesses
       where
-        foldMemberAccess :: SyntaxNode -> (SyntaxNode, Bool) -> SyntaxNode
-        foldMemberAccess x (node, isPtr) = MemberAccessNode isPtr x node
+        foldMemberAccess :: Expr -> (Expr, Bool) -> Expr
+        foldMemberAccess x (node, isPtr) = annotExprEmpty $ MemberAccessNode isPtr x node
         continueParsingMembers :: Token -> Bool
         continueParsingMembers token = operatorMatches "." token || operatorMatches "->" token
         -- Parses a single ". identifier ('[' expression ']')*"
-        parseMemberAccess :: ParseAction (SyntaxNode, Bool)
+        parseMemberAccess :: ParseAction (Expr, Bool)
         parseMemberAccess = do
             lookahead <- peekToken
             if | operatorMatches "." lookahead  -> do
                      eatOperator "."
-                     idNode <- scanIdentifier <&> IdentifierNode
+                     idNode <- scanIdentifier <&> annotExprEmpty . StructMemberNode
                      tryParseArray idNode >>= \rhs -> return (rhs, False)
                | operatorMatches "->" lookahead -> do
                      eatOperator "->"
-                     idNode <- scanIdentifier <&> IdentifierNode
+                     idNode <- scanIdentifier <&> annotExprEmpty . StructMemberNode
                      tryParseArray idNode >>= \rhs -> return (rhs, True)
                | otherwise                      -> raiseFailure "Unexpected token when parsing member access"
 
-parseBaseExpr :: ParseAction SyntaxNode
+parseBaseExpr :: ParseAction Expr
 parseBaseExpr = do
     lookahead <- peekToken
     if | isIdentifier lookahead           -> parseId
@@ -556,18 +559,18 @@ parseBaseExpr = do
        | punctuationMatches "(" lookahead -> parseParenthesis
        | otherwise                        -> raiseFailure "Unexpected type in base expression"
   where
-    parseId :: ParseAction SyntaxNode
-    parseId = IdentifierNode <$> scanIdentifier
-    parseConstant :: ParseAction SyntaxNode
-    parseConstant = LiteralNode <$> scanConstant 
-    parseParenthesis :: ParseAction SyntaxNode
+    parseId :: ParseAction Expr
+    parseId = annotExprEmpty . IdentifierNode <$> scanIdentifier
+    parseConstant :: ParseAction Expr
+    parseConstant = annotExprEmpty . LiteralNode <$> scanConstant 
+    parseParenthesis :: ParseAction Expr
     parseParenthesis = do
         eatPunctuation "("
         expr <- parseExpression
         eatPunctuation ")"
         return expr
 
-type ArgumentList = [SyntaxNode]
+type ArgumentList = [Expr]
 parseArgList :: ParseAction ArgumentList
 parseArgList = do
     maybeExpr <- peekToken
@@ -580,7 +583,7 @@ parseArgList = do
         firstArg <- parseExpression
         (firstArg:) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaArg
       where
-        parseCommaArg :: ParseAction SyntaxNode
+        parseCommaArg :: ParseAction Expr
         parseCommaArg = do
             eatToken
             parseExpression

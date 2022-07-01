@@ -1,4 +1,4 @@
-/*struct a {
+struct a {
     int x[5500];
     int y;
 }
@@ -9,5 +9,4 @@ int main() {
         a.x[x] = x;
     }
     return 0;
-}*/
-void main(){}
+}
