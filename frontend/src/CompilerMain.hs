@@ -21,10 +21,7 @@ validateAndPrint prog = do
     case res of
         Left msg ->      putStrLn msg
         Right (t, s)  -> do
-            mapM_ (putStrLn . show) t
-  where
-    printSingleFunc (FunctionDefinition rt fn pl root) =
-        putStrLn $ (show $ ExprType rt) ++ " " ++ fn ++ ":\n" ++ showSyntaxTree root
+            mapM_ print t
 
 
 main :: IO ()

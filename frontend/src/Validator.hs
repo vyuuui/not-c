@@ -141,10 +141,10 @@ membersUnique names = length names == S.size nameSet
     
 
 isPrimitiveType :: DataType -> Bool
-isPrimitiveType (typename, quals) = S.member typename baseTypes
+isPrimitiveType (typename, _) = S.member typename baseTypes
 
 isStructType :: DataType -> StructMap -> Bool
-isStructType (typename, ptrList) structs = M.member typename structs && null ptrList
+isStructType (typename, _) = M.member typename
 
 isIntegralType :: DataType -> Bool
 isIntegralType (typename, ptrList)
