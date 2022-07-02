@@ -1,20 +1,21 @@
 module Validator ( validateProgram ) where
 
-import qualified Data.Set as S
-import qualified Data.Map as M
-import qualified Data.List as L
-import Data.Maybe
-import Data.Functor ((<&>))
 import CompilerShared
+import CompilerShow
 import Control.Arrow
 import Control.Monad
-import Control.Monad.Trans.State.Lazy
 import Control.Monad.Loops
-import Parser
-import Lexer
-import Debug.Trace
+import Control.Monad.Trans.State.Lazy
 import Data.Fix
+import Data.Functor ((<&>))
 import Data.Functor.Compose
+import Data.Maybe
+import Debug.Trace
+import Lexer
+import Parser
+import qualified Data.List as L
+import qualified Data.Map as M
+import qualified Data.Set as S
 
 data VarInfo
     = FunctionVar DataType [(DataType, String)]
@@ -112,11 +113,11 @@ validateProgram (funcs, structs) =
           where
             -- Ensmarten me, you can technically have dead code at the end
             validateReturns :: SyntaxNode -> GeneratorAction ()
-            validateReturns node = case snd $ getCompose $ unFix node of
+            validateReturns node = return () {-$ case snd $ getCompose $ unFix node of
                 (SeqNode _ retNode) -> case snd $ getCompose $ unFix retNode of
                     ReturnNode _ -> return ()
                     _            -> raiseFailure $ "Function " ++ fname ++ " did not return a value"
-                _                   -> raiseFailure $ "Function " ++ fname ++ " did not return a value"
+                _                -> raiseFailure $ "Function " ++ fname ++ " did not return a value"-}
             addFunctionParameters :: [(DataType, String)] -> GeneratorAction ()
             addFunctionParameters = mapM_ (\(dataType, id) -> createVariable dataType >>= insertIntoEnv id)
 
@@ -155,15 +156,6 @@ isIntegralType (typename, ptrList)
   where
     isntPtr = null ptrList
 
-isValueType, isPointerType, isFloatType, isBoolType, isVoidType, isBasePointer :: DataType -> Bool
-isValueType (_, ptrList) = null ptrList 
-isPointerType = not . isValueType
-isFloatType = (==floatType)
-isBoolType = (==boolType)
-isVoidType = (==voidType)
-isBasePointer (_, [_]) = True
-isBasePointer _        = False
-
 isImplicitCastAllowed :: DataType -> DataType -> Bool
 isImplicitCastAllowed toType fromType =
     implicitCastAllowedSingle toType fromType ||
@@ -195,7 +187,7 @@ canShadow varName = get <&> canShadowHelper varName . environment
 
 validateSyntaxNode :: SyntaxNode -> GeneratorAction SyntaxNode
 validateSyntaxNode node = do
-    result <- validateHelper $ getCompose $ unFix annot
+    result <- validateHelper $ getCompose $ unFix node
     return $ Fix $ Compose result
   where
     validateHelper :: (SourceLoc, SyntaxNodeF SyntaxNode) -> GeneratorAction (SourceLoc, SyntaxNodeF SyntaxNode)
@@ -218,14 +210,11 @@ validateSyntaxNode node = do
     -- Primary recursive logic for validating SyntaxNodes
     -- Fans out to validating Exprs @ ExprNode
     validateSyntaxNodeF :: SyntaxNodeF SyntaxNode -> GeneratorAction (SyntaxNodeF SyntaxNode)
-    validateSyntaxNodeF (ExprNode expression) = do
-        expression <- computeDecltype <$> (environment <$> get)
-                                      <*> (structMap <$> get)
-                                      <*> pure expression
-        when
-          (invalidType == typeOf expression)
-          (raiseFailure "Invalid expression! TODO: Find the reason")
-        return $ ExprNode expression
+    validateSyntaxNodeF EmptyNode = return EmptyNode
+    validateSyntaxNodeF (SeqNode lhs rhs) = do
+        lhs <- validateSyntaxNode lhs
+        rhs <- validateSyntaxNode rhs
+        return $ SeqNode lhs rhs
     validateSyntaxNodeF (WhileNode condition block) = do
         condition <- validateSyntaxNode condition
         condType <- getExprDecltype condition
@@ -276,7 +265,7 @@ validateSyntaxNode node = do
           (isImplicitCastAllowed boolType condType)
           (raiseFailure $ "Cannot convert if condition expression from " ++ condTypeName ++ " to bool")
         -- TODO: maybe add implicit casts to bool if we ever change our minds?
-        pushEnvironment False
+        pushEnvironment False -- TODO: remove unnecessary blocks
         block <- validateSyntaxNode block
         popEnvironment
         pushEnvironment False
@@ -298,6 +287,17 @@ validateSyntaxNode node = do
             fmap (ReturnNode . copyAnnot expr . injectCast funcRetType)
                  (getExprRoot expr)
           else return $ ReturnNode expr
+    validateSyntaxNodeF ContinueNode = do
+        validateInLoop
+        return ContinueNode
+    validateSyntaxNodeF BreakNode = do
+        validateInLoop
+        return BreakNode
+    validateSyntaxNodeF (BlockNode block) = do
+        pushEnvironment False
+        block <- validateSyntaxNode block
+        popEnvironment
+        return $ BlockNode block
     validateSyntaxNodeF sn@(DeclarationNode declaredType id) = do
         unlessM
           (canShadow id)
@@ -323,11 +323,23 @@ validateSyntaxNode node = do
             fmap (DefinitionNode declaredType id . copyAnnot expr . injectCast declaredType)
                  (getExprRoot expr)
           else return $ DefinitionNode declaredType id expr
-    validateSyntaxNodeF EmptyNode = return EmptyNode
+    validateSyntaxNodeF (ExprNode expression) = do
+        expression <- computeDecltype <$> (environment <$> get)
+                                      <*> (structMap <$> get)
+                                      <*> pure expression
+        when
+          (invalidType == typeOf expression)
+          (raiseFailure $ "Invalid expression! Here:\n---\n" ++ showExprTree expression ++ "---\n")
+        return $ ExprNode expression
 
 -- See below for binary operation casting rules
 -- Takes a binary op, lhs, rhs and returns the (result type, operand cast type)
-binaryTypeResult :: StructMap -> BinaryOp -> DataType -> DataType -> (DataType, DataType)
+binaryTypeResult
+    :: StructMap
+    -> BinaryOp
+    -> DataType
+    -> DataType
+    -> (DataType, DataType, DataType)
 binaryTypeResult structs op lhsType rhsType
     | lhsType == invalidType   = invalidPair
     | rhsType == invalidType   = invalidPair
@@ -347,53 +359,54 @@ binaryTypeResult structs op lhsType rhsType
     | op == Or                 = decideLogical
     | op == And                = decideLogical
   where
-    invalidPair = dupe invalidType
+    invalidPair = dupe3 invalidType
     typeFormMatches tp1 tp2 = fst tp1 == fst tp2 && length (snd tp1) == length (snd tp2)
-    decideCompare :: (DataType, DataType)
+    decideCompare :: (DataType, DataType, DataType)
     decideCompare
-        | typeFormMatches lhsType rhsType                  = (boolType, lhsType)
-        | isIntegralType lhsType && isIntegralType rhsType = dupe $ largestType lhsType rhsType
-        | isIntegralType lhsType && isFloatType rhsType    = (boolType, rhsType)
-        | isFloatType lhsType && isIntegralType rhsType    = (boolType, lhsType)
+        | typeFormMatches lhsType rhsType                  = (boolType, lhsType, rhsType)
+        | isIntegralType lhsType && isIntegralType rhsType = dupe2nd boolType $ largestType lhsType rhsType
+        | isIntegralType lhsType && isFloatType rhsType    = (boolType, rhsType, rhsType)
+        | isFloatType lhsType && isIntegralType rhsType    = (boolType, lhsType, lhsType)
         | otherwise                                        = invalidPair
-    decideRelCompare :: (DataType, DataType)
+    decideRelCompare :: (DataType, DataType, DataType)
     decideRelCompare
         | isBoolType lhsType || isBoolType rhsType = invalidPair
         | otherwise                                = decideCompare
-    decideLogical :: (DataType, DataType)
+    decideLogical :: (DataType, DataType, DataType)
     decideLogical
-        | lhsType == boolType && rhsType == boolType = dupe boolType
+        | lhsType == boolType && rhsType == boolType = dupe3 boolType
         | otherwise                                  = invalidPair
-    decideModulus :: (DataType, DataType)
+    decideModulus :: (DataType, DataType, DataType)
     decideModulus
-        | isIntegralType lhsType && isIntegralType rhsType = dupe $ largestType lhsType rhsType
+        | isIntegralType lhsType && isIntegralType rhsType = dupe3 $ largestType lhsType rhsType
         | otherwise                                        = invalidPair
-    decideAddition :: (DataType, DataType)
+    decideAddition :: (DataType, DataType, DataType)
     decideAddition
     -- ptr + integral (ptr)
-        | isPointerType lhsType && isIntegralType rhsType  = dupe lhsType
-        | isPointerType rhsType && isIntegralType lhsType  = dupe rhsType
+        | isPointerType lhsType && isIntegralType rhsType  = (lhsType, lhsType, rhsType)
+        | isPointerType rhsType && isIntegralType lhsType  = (rhsType, lhsType, rhsType)
     -- integral + integral (largest of 2)
-        | isIntegralType lhsType && isIntegralType rhsType = dupe $ largestType lhsType rhsType
+        | isIntegralType lhsType && isIntegralType rhsType = dupe3 $ largestType lhsType rhsType
     -- integral + float (float)
-        | isIntegralType lhsType && isFloatType rhsType    = dupe floatType
+        | isIntegralType lhsType && isFloatType rhsType    = dupe3 floatType
+        | isIntegralType rhsType && isFloatType lhsType    = dupe3 floatType
     -- float + float (float)
-        | isFloatType lhsType && isFloatType rhsType       = dupe floatType
+        | isFloatType lhsType && isFloatType rhsType       = dupe3 floatType
     -- anything else = invalid
         | otherwise = invalidPair
-    decideMultiplication :: (DataType, DataType)
+    decideMultiplication :: (DataType, DataType, DataType)
     decideMultiplication
     -- either are pointers -> not allowed
         | isPointerType lhsType || isPointerType rhsType = invalidPair
         | otherwise = decideAddition
-    decideSubtraction :: (DataType, DataType)
+    decideSubtraction :: (DataType, DataType, DataType)
     decideSubtraction
     -- ptr - ptr (long)
         | isPointerType lhsType && isPointerType rhsType &&
-          typeFormMatches lhsType rhsType = (longType, lhsType) -- lhs or rhs, effectively the same
+          typeFormMatches lhsType rhsType = (ptrdiffType, lhsType, rhsType)
         | isPointerType rhsType && isBaseType rhsType = invalidPair
         | otherwise = decideAddition
-    decideDivision :: (DataType, DataType)
+    decideDivision :: (DataType, DataType, DataType)
     decideDivision = decideMultiplication
 
 unaryTypeResult :: UnaryOp -> DataType -> DataType
@@ -422,7 +435,7 @@ unaryTypeResult op subType
 -- This is the core typechecking function
 -- It will act as both the typechecker as well as the cast generator for a full Expr tree
 computeDecltype :: Environment -> StructMap -> Expr -> Expr
-computeDecltype env structs = cata (Fix . Compose . first (arr ExprType) . alg . snd . getCompose)
+computeDecltype env structs = foldFix (Fix . Compose . first (arr ExprType) . alg . snd . getCompose)
   where
     lookup :: String -> VarInfo
     lookup = fromMaybe (PrimitiveVar invalidType) . flip lookupVar env
@@ -484,18 +497,19 @@ computeDecltype env structs = cata (Fix . Compose . first (arr ExprType) . alg .
         | otherwise = (unaryTypeResult Dereference $ typeOf arr, n)
     alg n@(ParenthesisNode sub) = (typeOf sub, n)
     alg n@(BinaryOpNode op lhs rhs)
-        | outType == invalidType = (invalidType, n)
-        | otherwise              = (outType, BinaryOpNode op (castToCastType lhs) (castToCastType rhs))
+        | typeOf lhsCast == invalidType = (invalidType, n)
+        | typeOf rhsCast == invalidType = (invalidType, n)
+        | otherwise                     = (binOpType, BinaryOpNode op lhsCast rhsCast)
       where
-        (outType, castType) = binaryTypeResult structs op (typeOf lhs) (typeOf rhs)
-        castToCastType = flip castOrInvalid outType
+        (binOpType, lhsType, rhsType) = binaryTypeResult structs op (typeOf lhs) (typeOf rhs)
+        lhsCast = castOrInvalid lhs lhsType
+        rhsCast = castOrInvalid rhs rhsType
     alg n@(UnaryOpNode op sub)
-        | typeOf newSub == invalidType         = (invalidType, n)
+        | typeOf sub == invalidType            = (invalidType, n)
         | op == Reference && not (isIdVar sub) = (invalidType, n)
-        | otherwise                            = (uType, UnaryOpNode op newSub)
+        | otherwise                            = (uType, UnaryOpNode op sub)
       where
         uType = unaryTypeResult op $ typeOf sub
-        newSub = castOrInvalid sub uType
     alg n@(AssignmentNode op lhs rhs) -- TODO: this should probably be broken into a (x = x op y | op /= NoOp)
         | typeOf lhs == invalidType    = (invalidType, n)
         | typeOf newRhs == invalidType = (invalidType, n)
@@ -529,7 +543,7 @@ computeDecltype env structs = cata (Fix . Compose . first (arr ExprType) . alg .
 
     -- why do structs even exist? I kinda just hate them
     computeMemberAccess :: StructDefinition -> Expr -> Expr
-    computeMemberAccess struct = cata (Fix . Compose . alg . getCompose)
+    computeMemberAccess struct = foldFix (Fix . Compose . alg . getCompose)
       where
         alg :: (ExprType, ExprF Expr) -> (ExprType, ExprF Expr)
         alg (_, n@(StructMemberNode name)) = (ExprType $ getMemberType struct name, n)

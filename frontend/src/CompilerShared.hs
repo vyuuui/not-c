@@ -1,22 +1,26 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE DeriveFunctor #-}
-{-# Language TemplateHaskell #-}
 module CompilerShared where
 
+import Control.Arrow ((>>>), (&&&))
+import Control.Monad.Trans (lift)
+import Control.Monad.Trans.State.Lazy (StateT)
+import Data.Fix (Fix(..), unFix)
+import Data.Functor.Classes ()
+import Data.Functor.Compose (Compose(..), getCompose)
+import Data.Maybe (maybe)
 import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad.Trans.State.Lazy ( StateT )
-import Control.Monad.Trans (lift)
-import Data.Fix
-import Data.Functor.Compose
-import Data.Functor.Classes
-import Data.Maybe
-import Text.Show.Deriving
 
 dupe :: a -> (a, a)
 dupe x = (x, x)
+dupe2nd :: a -> b -> (a, b, b)
+dupe2nd x y = (x, y, y)
+dupe3 :: a -> (a, a, a)
+dupe3 x = (x, x, x)
 
+-- Tokens
 data ConstantType
     = IntConstant Int
     | FloatConstant Float
@@ -35,10 +39,13 @@ data Token
     | Invalid
     deriving (Show, Eq)
 
+type TokenPos = (Token, Int)
+
 -- DataType: Tuple of typename and array/pointer qualifiers
 type DataType = (String, [Int])
 
-invalidType, boolType, charType, shortType, intType, longType, floatType, voidType :: DataType
+-- DataType utilities
+invalidType, boolType, charType, shortType, intType, longType, floatType, voidType, ptrdiffType :: DataType
 invalidType = ("$", [])
 boolType = ("bool", [])
 charType = ("char", [])
@@ -47,6 +54,17 @@ intType = ("int", [])
 longType = ("long", [])
 floatType = ("float", [])
 voidType = ("void", [])
+ptrdiffType = longType
+
+-- Checking basic types
+isValueType, isPointerType, isFloatType, isBoolType, isVoidType, isBasePointer :: DataType -> Bool
+isValueType (_, ptrList) = null ptrList 
+isPointerType = not . isValueType
+isFloatType = (==floatType)
+isBoolType = (==boolType)
+isVoidType = (==voidType)
+isBasePointer (_, [_]) = True
+isBasePointer _        = False
 
 classifySize :: String -> Int
 classifySize tp
@@ -59,12 +77,37 @@ classifySize tp
     | otherwise      = 0
 
 largestType :: DataType -> DataType -> DataType
-largestType t1 t2 = snd $ maximum (zip (map (classifySize . fst) typeList) typeList)
+largestType t1 t2
+    | t1Size >= t2Size = t1
+    | otherwise        = t2
   where
-    typeList = [t1, t2]
+    t1Size = classifySize $ fst t1
+    t2Size = classifySize $ fst t2
+
+-- Copy annotation 'a' from an existing annotated fixpoint to an unannotated fixpoint
+copyAnnot
+    :: (Functor f)
+    => Fix (Compose ((,) a) f)
+    -> f (Fix (Compose ((,) a) f))
+    -> Fix (Compose ((,) a) f)
+copyAnnot from = (Fix . Compose) . (,) (fst $ getCompose $ unFix from)
 
 -- Expression Tree: Subset of AST which is evaluable
 -- Nodes will be annotated with a datatype
+data ExprF r
+    = IdentifierNode String
+    | StructMemberNode String  -- To differentiate between ids and structmems sans context
+    | LiteralNode ConstantType
+    | FunctionCallNode String [r]
+    | ArrayIndexNode r r
+    | ParenthesisNode r
+    | BinaryOpNode BinaryOp r r
+    | UnaryOpNode UnaryOp r
+    | AssignmentNode AssignmentOp r r
+    | MemberAccessNode Bool r r
+    | CastNode DataType r
+    deriving (Functor)
+
 data BinaryOp
     = Addition
     | Multiplication
@@ -97,30 +140,7 @@ data UnaryOp
     | Dereference
     deriving (Show, Eq)
 
--- Copy annotation 'a' from an existing annotated fixpoint to an unannotated fixpoint
-copyAnnot
-    :: (Functor f)
-    => Fix (Compose ((,) a) f)
-    -> f (Fix (Compose ((,) a) f))
-    -> Fix (Compose ((,) a) f)
-copyAnnot from = (Fix . Compose) . (,) (fst $ getCompose $ unFix from)
-
-data ExprF r
-    = IdentifierNode String
-    | StructMemberNode String  -- To differentiate between ids and structmems sans context
-    | LiteralNode ConstantType
-    | FunctionCallNode String [r]
-    | ArrayIndexNode r r
-    | ParenthesisNode r
-    | BinaryOpNode BinaryOp r r
-    | UnaryOpNode UnaryOp r
-    | AssignmentNode AssignmentOp r r
-    | MemberAccessNode Bool r r
-    | CastNode DataType r
-    deriving (Show, Functor)
-deriveShow1 ''ExprF
-
-newtype ExprType = ExprType { dataType :: DataType } deriving (Show, Eq)
+newtype ExprType = ExprType { dataType :: DataType } deriving (Eq)
 type ExprAnn = Compose ((,) ExprType)
 type Expr = Fix (ExprAnn ExprF)
 
@@ -144,13 +164,13 @@ data SyntaxNodeF r
     | ReturnNode r
     | ContinueNode
     | BreakNode
+    | BlockNode r
     -- Decl
     | DeclarationNode DataType String
     | DefinitionNode DataType String r
     -- Breakout to expressions
     | ExprNode Expr
-    deriving (Show, Functor)
-deriveShow1 ''SyntaxNodeF
+    deriving (Functor)
 
 isEmptyNode :: SyntaxNode -> Bool
 isEmptyNode nod = case snd $ getCompose $ unFix nod of
@@ -167,7 +187,7 @@ annotSyntaxEmpty :: SyntaxNodeF SyntaxNode -> SyntaxNode
 annotSyntaxEmpty = annotSyntax 0 0
 
 type TypeEnv = S.Set String
-type LexerState = ([Token], String)
+type LexerState = ([TokenPos], String, Int)
 type ParseAction = StateT ParseState (Either String)
 type Program = ([FunctionDefinition], [StructDefinition])
 
@@ -176,9 +196,9 @@ data FunctionDefinition = FunctionDefinition
     , funcName :: String
     , paramList :: [(DataType, String)]
     , rootNode :: SyntaxNode
-    } deriving Show
+    }
 
-newtype StructDefinition = StructDefinition (String, [(DataType, String)]) deriving Show
+newtype StructDefinition = StructDefinition (String, [(DataType, String)])
 
 getMemberType :: StructDefinition -> String -> DataType 
 getMemberType (StructDefinition (_, memberList)) name =
@@ -197,7 +217,7 @@ isBaseType :: DataType -> Bool
 isBaseType (name, _) = S.member name baseTypes
 
 initialState :: String -> ParseState
-initialState progStr = ParseState ([], progStr) baseTypes [] [] [M.fromList (map (, TypeSym) $ S.toList baseTypes)]
+initialState progStr = ParseState ([], progStr, 0) baseTypes [] [] [M.fromList (map (, TypeSym) $ S.toList baseTypes)]
 
 getIdentifierType :: String -> SymbolMap -> SymbolType
 getIdentifierType _ []          = UnkSym
@@ -213,11 +233,10 @@ data ParseState = ParseState
     , structList :: [StructDefinition]
     , symbolMap :: SymbolMap  -- List of all taken symbol names + kind
     }
-    deriving Show
 
 popToken :: ParseState -> (Token, ParseState)
-popToken (ParseState (h:t, rest) env funcs structs syms) = (h, ParseState (t, rest) env funcs structs syms)
-popToken (ParseState ([], rest) env funcs structs syms) = error "popToken called on empty token list"
+popToken (ParseState (h:t, rest, clt) env funcs structs syms) = (fst h, ParseState (t, rest, clt + snd h) env funcs structs syms)
+popToken (ParseState ([], rest, clt) env funcs structs syms) = error "popToken called on empty token list"
 
 isIdentifier :: Token -> Bool
 isIdentifier (Identifier _) = True

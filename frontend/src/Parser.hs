@@ -1,8 +1,5 @@
 module Parser where
 
-import qualified Data.Set as S
-import qualified Data.Map as M
-import qualified Data.List as L
 import CompilerShared
 import Control.Monad
 import Control.Monad.Loops ( iterateUntilM, whileM_, whileM, untilM )
@@ -12,17 +9,11 @@ import Data.Either
 import Data.Functor
 import Debug.Trace
 import Lexer
-import System.IO
+import qualified Data.List as L
+import qualified Data.Map as M
+import qualified Data.Set as S
 
 type ParameterList = [(DataType, String)]
-
-loadAndParse :: String -> IO Program
-loadAndParse file = do
-    handle <- openFile file ReadMode
-    contents <- hGetContents handle
-    case parseProg contents of
-        Right prog -> return prog
-        Left msg -> error ("Bad program nat! msg=" ++ msg)
 
 getTypeEnv :: ParseAction TypeEnv
 getTypeEnv = typeEnv <$> get
@@ -41,6 +32,11 @@ popSymbolEnv = do
     ParseState lexer typeEnv funcs structs syms <- get
     put $ ParseState lexer typeEnv funcs structs (tail syms)
 
+getLexPosition :: ParseAction Int
+getLexPosition = do
+    (t, rest, clt) <- lexerState <$> get
+    return clt
+
 insertSymbol :: String -> SymbolType -> ParseAction ()
 insertSymbol symName sym = do
     when (S.member symName baseTypes) (raiseFailure $ "Can't declare reserved typename " ++ symName)
@@ -51,41 +47,35 @@ insertSymbol symName sym = do
 -- Returns the newly lexed token
 lexNewToken :: ParseAction Token
 lexNewToken = do
-    ParseState (cacheTok, progStr) typeEnv funcs structs syms <- get
-    let (newTok, restProg) = lexStringSingle typeEnv progStr
-    put $ ParseState (cacheTok ++ [newTok], restProg) typeEnv funcs structs syms
+    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms <- get
+    let (newTok, numParsed, restProg) = lexStringSingle typeEnv progStr
+    put $ ParseState (cacheTok ++ [(newTok, numParsed)], restProg, clt) typeEnv funcs structs syms
     return newTok
 
 scanToken :: ParseAction Token
 scanToken = do
-    ParseState (cacheTok, progStr) typeEnv funcs structs syms <- get
-    case cacheTok of
-        headTok:restTok -> do
-            put $ ParseState (restTok, progStr) typeEnv funcs structs syms
-            return headTok
-        _               -> do
-            lexNewToken
-            state popToken
+    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms <- get
+    when (null cacheTok) (void lexNewToken)
+    state popToken
 
 eatToken :: ParseAction ()
 eatToken = void scanToken
 
 peekToken :: ParseAction Token
 peekToken = do
-    ParseState (cacheTok, progStr) _ _ _ _ <- get
-    case cacheTok of
-        headTok:restTok -> do
-            return headTok
-        _               -> lexNewToken
+    (cacheTok, _, _) <- lexerState <$> get
+    if null cacheTok
+    then lexNewToken
+    else return $ fst (head cacheTok)
 
 peekTwoToken :: ParseAction (Token, Token)
 peekTwoToken = do
-    ParseState (cacheTok, progStr) _ _ _ _ <- get
+    (cacheTok, _, _) <- lexerState <$> get
     case cacheTok of
-        tok1:tok2:restTok -> return (tok1, tok2)
+        tok1:tok2:restTok -> return (fst tok1, fst tok2)
         [tok1]            -> do
             tok2 <- lexNewToken
-            return (tok1, tok2)
+            return (fst tok1, tok2)
         _                 -> do
             tok1 <- lexNewToken
             tok2 <- lexNewToken
@@ -202,7 +192,7 @@ parseFunction = do
     eatPunctuation "("
     paramList <- parseParamList
     eatPunctuation ")"
-    blockNode <- parseBlock
+    blockNode <- doAnnotate parseBlock
     popSymbolEnv
     return $ FunctionDefinition typeName id paramList blockNode
 
@@ -231,18 +221,18 @@ parseParamList = do
             return (typeName, id)
 
 -- block = '{' stmt* '}'
-parseBlock :: ParseAction SyntaxNode
+parseBlock :: ParseAction (SyntaxNodeF SyntaxNode)
 parseBlock = do
     eatPunctuation "{"
     pushSymbolEnv
-    statementList <- whileM (peekToken <&> not . punctuationMatches "}") parseStatement 
+    statementList <- whileM (peekToken <&> not . punctuationMatches "}") (doAnnotate parseStatement)
     popSymbolEnv
     eatPunctuation "}"
-    return $ sequenceStatements statementList
+    return $ BlockNode $ sequenceStatements statementList
   where
     -- foldl ensures that sequence nodes are built in forward order
     sequenceStatements :: [SyntaxNode] -> SyntaxNode
-    sequenceStatements = L.foldl' (\x a -> annotSyntaxEmpty $ SeqNode x a) (annotSyntaxEmpty EmptyNode)
+    sequenceStatements = L.foldl' (\a x -> copyAnnot x $ SeqNode a x) (annotSyntaxEmpty EmptyNode)
 
 isTypeName :: SymbolMap -> Token -> Bool
 isTypeName smap (Identifier id) = getIdentifierType id smap == TypeSym
@@ -271,16 +261,16 @@ isContinue = controlMatches "continue"
 isBreak :: Token -> Bool 
 isBreak = controlMatches "break"
 
-parseStatement :: ParseAction SyntaxNode
+parseStatement :: ParseAction (SyntaxNodeF SyntaxNode)
 parseStatement = do
     tok <- peekToken
     smap <- getSymbolMap
     env <- getTypeEnv
     if isTypeName smap tok
-        then parseDeclaration
+        then parseDeclaration >>= \x -> eatPunctuation ";" >> return x
         else parseStatementLookahead env tok
   where
-    parseStatementLookahead :: TypeEnv -> Token -> ParseAction SyntaxNode
+    parseStatementLookahead :: TypeEnv -> Token -> ParseAction (SyntaxNodeF SyntaxNode)
     parseStatementLookahead env lookahead
         | isBlock lookahead       = parseBlock
         | isExpression lookahead  = do
@@ -296,77 +286,85 @@ parseStatement = do
             return node
         | isEmpty lookahead       = do
             eatPunctuation ";"
-            return $ annotSyntaxEmpty EmptyNode
+            return EmptyNode
         | isContinue lookahead    = do
             eatControl "continue"
             eatPunctuation ";"
-            return $ annotSyntaxEmpty ContinueNode
+            return ContinueNode
         | isBreak lookahead       = do
             eatControl "break"
             eatPunctuation ";"
-            return $ annotSyntaxEmpty BreakNode
+            return BreakNode
         | otherwise               = raiseFailure "Unexpected token when parsing statement"
 
-parseCondition :: ParseAction SyntaxNode
+doAnnotate :: ParseAction (SyntaxNodeF SyntaxNode) -> ParseAction SyntaxNode
+doAnnotate action = do
+    startPos <- getLexPosition
+    rawNode <- action
+    endPos <- getLexPosition
+    return $ annotSyntax startPos endPos rawNode
+
+parseCondition :: ParseAction (SyntaxNodeF SyntaxNode)
 parseCondition = do
     eatControl "if"
     eatPunctuation "("
-    expressionNode <- parseWrapExpression
+    expressionNode <- doAnnotate parseWrapExpression
     eatPunctuation ")"
-    block <- parseBlock
+    block <- doAnnotate parseBlock
     maybeElse <- peekToken
     if controlMatches "else" maybeElse
         then do
             eatControl "else"
-            elseBlock <- parseBlock
-            return $ annotSyntaxEmpty $ IfElseNode expressionNode block elseBlock
-        else return $ annotSyntaxEmpty $ IfNode expressionNode block
+            elseBlock <- doAnnotate parseBlock
+            return $ IfElseNode expressionNode block elseBlock
+        else do
+            return $ IfNode expressionNode block
 
-parseWhileLoop :: ParseAction SyntaxNode
+parseWhileLoop :: ParseAction (SyntaxNodeF SyntaxNode)
 parseWhileLoop = do
     eatControl "while"
     eatPunctuation "("
-    expressionNode <- parseWrapExpression
+    expressionNode <- doAnnotate parseWrapExpression
     eatPunctuation ")"
-    block <- parseBlock
-    return $ annotSyntaxEmpty $ WhileNode expressionNode block
+    block <- doAnnotate parseBlock
+    return $ WhileNode expressionNode block
 
-parseForInit :: ParseAction SyntaxNode
+parseForInit :: ParseAction (SyntaxNodeF SyntaxNode)
 parseForInit = getSymbolMap >>= \syms -> peekToken >>= parseForInitLookahead syms
   where
-    parseForInitLookahead :: SymbolMap -> Token -> ParseAction SyntaxNode
+    parseForInitLookahead :: SymbolMap -> Token -> ParseAction (SyntaxNodeF SyntaxNode)
     parseForInitLookahead syms lookahead
         | isTypeName syms lookahead        = parseDeclaration
         | isExpression lookahead           = parseWrapExpression
-        | punctuationMatches ";" lookahead = return $ annotSyntaxEmpty EmptyNode
+        | punctuationMatches ";" lookahead = return EmptyNode
         | otherwise                        = raiseFailure "Unexpected token in for loop init"
 
-parseForExpr :: ParseAction SyntaxNode
+parseForExpr :: ParseAction (SyntaxNodeF SyntaxNode)
 parseForExpr = peekToken >>= parseForExprLookahead
   where
-    parseForExprLookahead :: Token -> ParseAction SyntaxNode
+    parseForExprLookahead :: Token -> ParseAction (SyntaxNodeF SyntaxNode)
     parseForExprLookahead lookahead
         | isExpression lookahead           = parseWrapExpression
         | punctuationMatches ";" lookahead ||
-          punctuationMatches ")" lookahead = return $ annotSyntaxEmpty EmptyNode
+          punctuationMatches ")" lookahead = return EmptyNode
         | otherwise                        = raiseFailure "Unexpected token in for loop expression"
 
-parseForLoop :: ParseAction SyntaxNode
+parseForLoop :: ParseAction (SyntaxNodeF SyntaxNode)
 parseForLoop = do
     pushSymbolEnv
     eatControl "for"
     eatPunctuation "("
-    forInit <- parseForInit
+    forInit <- doAnnotate parseForInit
     eatPunctuation ";"
-    forCond <- parseForExpr
+    forCond <- doAnnotate parseForExpr
     eatPunctuation ";"
-    forExpr <- parseForExpr
+    forExpr <- doAnnotate parseForExpr
     eatPunctuation ")"
-    block <- parseBlock
+    block <- doAnnotate parseBlock
     popSymbolEnv
-    return $ annotSyntaxEmpty $ ForNode forInit forCond forExpr block
+    return $ ForNode forInit forCond forExpr block
 
-parseDeclaration :: ParseAction SyntaxNode
+parseDeclaration :: ParseAction (SyntaxNodeF SyntaxNode)
 parseDeclaration = do
     (typeName, ptrList) <- parseType
     id <- scanIdentifier
@@ -375,21 +373,21 @@ parseDeclaration = do
     case nextTok of
         Operator "=" -> do 
             eatToken
-            expressionNode <- parseWrapExpression
+            expressionNode <- doAnnotate parseWrapExpression
             insertSymbol id VarSym
-            return $ annotSyntaxEmpty (DefinitionNode (typeName, arrayList ++ ptrList) id expressionNode)
+            return $ DefinitionNode (typeName, arrayList ++ ptrList) id expressionNode
         _            -> do 
             insertSymbol id VarSym
-            return $ annotSyntaxEmpty (DeclarationNode (typeName, arrayList ++ ptrList) id)
+            return $ DeclarationNode (typeName, arrayList ++ ptrList) id
 
-parseReturn :: ParseAction SyntaxNode
+parseReturn :: ParseAction (SyntaxNodeF SyntaxNode)
 parseReturn = do
     eatControl "return"
-    expressionNode <- parseWrapExpression
-    return $ annotSyntaxEmpty $ ReturnNode expressionNode
+    expressionNode <- doAnnotate parseWrapExpression
+    return $ ReturnNode expressionNode
 
-parseWrapExpression :: ParseAction SyntaxNode
-parseWrapExpression = annotSyntaxEmpty . ExprNode <$> parseAssignment
+parseWrapExpression :: ParseAction (SyntaxNodeF SyntaxNode)
+parseWrapExpression = ExprNode <$> parseAssignment
 
 parseExpression :: ParseAction Expr
 parseExpression = parseAssignment

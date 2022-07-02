@@ -6,8 +6,10 @@ import qualified Data.List as L
 import qualified Data.Char as C
 import System.IO
 import Debug.Trace
+import Control.Arrow
+import Data.Tuple (swap)
 
-type LexerResult = (Token, String)
+type LexerResult = (Token, Int, String)
 
 operators :: S.Set String
 operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!", "&", "->", "."]
@@ -32,68 +34,73 @@ isNumber h = C.isDigit h || h == '.'
 isPunctuationChar :: Char -> Bool
 isPunctuationChar h = S.member [h] punctuation
 
-lexStringNoComment :: TypeEnv -> String -> LexerResult
-lexStringNoComment env str2@(h:t) 
-    | isOperatorChar h      = lexOperator str2
-    | isPunctuationChar h   = (Punctuation [h], t)
-    | C.isDigit h           = let (token, rest) = span Lexer.isNumber t
-                               in (classifyNumberToken (h:token), rest)
-    | isLetterChar h        = let (token, rest) = span isIdentifierChar t
-                               in (classifyLetterToken (h:token) env, rest)
-    | C.isSpace h           = lexStringSingle env (eatWs t)
-    | h == '"'              = lexStringConstant t
-    | otherwise             = (Invalid, t)
-  where
-    lexStringConstant :: String -> LexerResult
-    lexStringConstant str
-        = tryAppendStr $ until endingQuote buildString ("", str)
-      where
-        endingQuote (_, h:t) = h == '"'
-        endingQuote (_, []) = True
-        buildString (lhs, h1:h2:t)
-            | h1 == '\\' && h2 == 'n' = (lhs ++ ['\n'], t)
-            | h1 == '\\' && h2 == 't' = (lhs ++ ['\t'], t)
-            | h1 == '\\' && h2 == 'r' = (lhs ++ ['\r'], t)
-            | h1 == '\\' && h2 == '"' = (lhs ++ ['"'], t)
-            | otherwise               = (lhs ++ [h1], h2:t)
-        buildString (lhs, [h]) = (lhs ++ [h], t)
-        buildString (lhs, [])  = (lhs, "")
-        tryAppendStr (buildStr, _:t) = (Constant $ StringConstant buildStr, t)
-        tryAppendStr (_, rest) = (Invalid, rest)
-    eatWs = dropWhile C.isSpace
-    classifyNumberToken str 
-        | '.' `elem` str = Constant $ FloatConstant (read str :: Float)
-        | otherwise      = Constant $ IntConstant (read str :: Int)
-    classifyLetterToken str env
-        | str == "true"            = Constant $ BoolConstant True
-        | str == "false"           = Constant $ BoolConstant False
-        | S.member str control     = Control str
-        | S.member str punctuation = Punctuation str
-        | S.member str keyword     = Keyword str
-        | otherwise                = Identifier str
-    lexOperator :: String -> LexerResult
-    lexOperator str
-        | null longestMatch = (Invalid, rest)
-        | otherwise         = (Operator longestMatch, drop (length longestMatch) str)
-      where
-        checkStop (_, _, [])            = True
-        checkStop (cur, _, rest)        = not (any (L.isPrefixOf cur) (S.toList operators))
-        stepLex (cur, longest, rest) 
-            | S.member newCur operators = (newCur, newCur, tail rest)
-            | otherwise                 = (newCur, longest, tail rest)
-          where
-            newCur = cur ++ [head rest]
-        (end, longestMatch, rest) = until checkStop stepLex ("", "", str)
+dropAndCount :: (a -> Bool) -> [a] -> ([a], Int)
+dropAndCount fn = span fn >>> first (arr length) >>> swap
 
 lexStringSingle :: TypeEnv -> String -> LexerResult
-lexStringSingle env str@(h1:h2:t)
-    | h1 == '/' && h2 == '/' = lexStringSingle env (tail $ dropWhile (/='\n') t) 
-    | h1 == '/' && h2 == '*' = lexStringSingle env (findCommentEnd t)
-    | otherwise              = lexStringNoComment env str
+lexStringSingle env str = lexStringSingleHelper env str 0
   where
-    findCommentEnd :: String -> String
-    findCommentEnd (h1:h2:t)
-        | h1 == '*' && h2 == '/' = t
-        | otherwise              = findCommentEnd (h2:t)
-lexStringSingle env str@[h1] = lexStringNoComment env str
-lexStringSingle _ []         = (Eof, [])
+    lexStringSingleHelper :: TypeEnv -> String -> Int -> LexerResult
+    lexStringSingleHelper env str@[h1] numParsed = lexStringNoComment env str numParsed
+    lexStringSingleHelper _ [] numParsed         = (Eof, numParsed, [])
+    lexStringSingleHelper env str@(h1:h2:t) numParsed
+        | h1 == '/' && h2 == '/' = uncurry (lexStringSingleHelper env) $ second (+(numParsed + 2)) (dropAndCount (/='\n') t) 
+        | h1 == '/' && h2 == '*' = uncurry (lexStringSingleHelper env) (findCommentEnd t (numParsed + 2))
+        | otherwise              = lexStringNoComment env str numParsed
+      where
+        findCommentEnd :: String -> Int -> (String, Int)
+        findCommentEnd (h1:h2:t) numParsed
+            | h1 == '*' && h2 == '/' = (t, numParsed + 2)
+            | otherwise              = findCommentEnd (h2:t) $ numParsed + 1
+    lexStringNoComment :: TypeEnv -> String -> Int -> LexerResult
+    lexStringNoComment env str2@(h:t) numParsed
+        | isOperatorChar h      = lexOperator str2 numParsed
+        | isPunctuationChar h   = (Punctuation [h], numParsed + 1, t)
+        | C.isDigit h           = let (token, rest) = span Lexer.isNumber t
+                                      totalParsed = numParsed + length token + 1
+                                  in  (classifyNumberToken (h:token), totalParsed, rest)
+        | isLetterChar h        = let (token, rest) = span isIdentifierChar t
+                                      totalParsed = numParsed + length token + 1
+                                  in  (classifyLetterToken (h:token) env, totalParsed, rest)
+        | C.isSpace h           = uncurry (lexStringSingleHelper env) $ second (+numParsed) (dropAndCount C.isSpace (h:t))
+        | h == '"'              = lexStringConstant t numParsed
+        | otherwise             = (Invalid, numParsed, t)
+      where
+        lexStringConstant :: String -> Int -> LexerResult
+        lexStringConstant str numParsed = tryAppendStr $ until endingQuote buildString ("", numParsed, str)
+          where
+            endingQuote (_, _, h:t) = h == '"'
+            endingQuote (_, _, []) = True
+            buildString (lhs, numParsed, h1:h2:t)
+                | h1 == '\\' && h2 == 'n' = (lhs ++ ['\n'], numParsed + 2, t)
+                | h1 == '\\' && h2 == 't' = (lhs ++ ['\t'], numParsed + 2, t)
+                | h1 == '\\' && h2 == 'r' = (lhs ++ ['\r'], numParsed + 2, t)
+                | h1 == '\\' && h2 == '"' = (lhs ++ ['"'], numParsed + 2, t)
+                | otherwise               = (lhs ++ [h1], numParsed + 1, h2:t)
+            buildString (lhs, numParsed, [h]) = (lhs ++ [h], numParsed + 1, t)
+            buildString (lhs, numParsed, [])  = (lhs, numParsed + 1, "")
+            tryAppendStr (buildStr, numParsed, _:t) = (Constant $ StringConstant buildStr, numParsed, t)
+            tryAppendStr (_, numParsed, rest) = (Invalid, numParsed, rest)
+        classifyNumberToken str 
+            | '.' `elem` str = Constant $ FloatConstant (read str :: Float)
+            | otherwise      = Constant $ IntConstant (read str :: Int)
+        classifyLetterToken str env
+            | str == "true"            = Constant $ BoolConstant True
+            | str == "false"           = Constant $ BoolConstant False
+            | S.member str control     = Control str
+            | S.member str punctuation = Punctuation str
+            | S.member str keyword     = Keyword str
+            | otherwise                = Identifier str
+        lexOperator :: String -> Int -> LexerResult
+        lexOperator str numParsed
+            | null longestMatch = (Invalid, numParsed, rest)
+            | otherwise         = (Operator longestMatch, numParsed + length longestMatch, drop (length longestMatch) str)
+          where
+            checkStop (_, _, [])            = True
+            checkStop (cur, _, rest)        = not (any (L.isPrefixOf cur) (S.toList operators))
+            stepLex (cur, longest, rest) 
+                | S.member newCur operators = (newCur, newCur, tail rest)
+                | otherwise                 = (newCur, longest, tail rest)
+              where
+                newCur = cur ++ [head rest]
+            (end, longestMatch, rest) = until checkStop stepLex ("", "", str)
