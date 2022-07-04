@@ -2,13 +2,14 @@
 {-# LANGUAGE DeriveFunctor #-}
 module CompilerShared where
 
-import Control.Arrow ((>>>), (&&&))
+import Control.Arrow (arr, first, (>>>), (&&&))
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.State.Lazy (StateT)
 import Data.Fix (Fix(..), unFix)
 import Data.Functor.Classes ()
 import Data.Functor.Compose (Compose(..), getCompose)
 import Data.Maybe (maybe)
+import Data.Tuple (swap)
 import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -37,12 +38,14 @@ data Token
     | Keyword String
     | Eof
     | Invalid
-    deriving (Show, Eq)
+    deriving (Eq)
 
 type TokenPos = (Token, Int)
+data FailureInfo = FailureInfo { failReason :: String, failRegion :: (Int, Int) }
 
 -- DataType: Tuple of typename and array/pointer qualifiers
 type DataType = (String, [Int])
+type DeclList = [(DataType, String)]
 
 -- DataType utilities
 invalidType, boolType, charType, shortType, intType, longType, floatType, voidType, ptrdiffType :: DataType
@@ -65,6 +68,17 @@ isBoolType = (==boolType)
 isVoidType = (==voidType)
 isBasePointer (_, [_]) = True
 isBasePointer _        = False
+
+datatypeSize :: DataType -> Int
+datatypeSize tp
+    | isPointerType tp = 8
+    | tp == boolType  = 1
+    | tp == charType  = 1
+    | tp == shortType = 2
+    | tp == intType   = 4
+    | tp == longType  = 8
+    | tp == floatType = 8
+    | otherwise       = 0
 
 classifySize :: String -> Int
 classifySize tp
@@ -187,8 +201,8 @@ annotSyntaxEmpty :: SyntaxNodeF SyntaxNode -> SyntaxNode
 annotSyntaxEmpty = annotSyntax 0 0
 
 type TypeEnv = S.Set String
-type LexerState = ([TokenPos], String, Int)
-type ParseAction = StateT ParseState (Either String)
+type LexerState = ([TokenPos], String, (Int, Int))
+type ParseAction = StateT ParseState (Either FailureInfo)
 type Program = ([FunctionDefinition], [StructDefinition])
 
 data FunctionDefinition = FunctionDefinition
@@ -196,9 +210,15 @@ data FunctionDefinition = FunctionDefinition
     , funcName :: String
     , paramList :: [(DataType, String)]
     , rootNode :: SyntaxNode
+    , funcAnnot :: FunctionAnnotation
+    }
+data FunctionAnnotation = FunctionAnnotation
+    { returnTypeLoc :: SourceLoc
+    , funcNameLoc :: SourceLoc
+    , paramsLoc :: [SourceLoc]
     }
 
-newtype StructDefinition = StructDefinition (String, [(DataType, String)])
+newtype StructDefinition = StructDefinition { getStructDef :: (String, [(DataType, String)]) }
 
 getMemberType :: StructDefinition -> String -> DataType 
 getMemberType (StructDefinition (_, memberList)) name =
@@ -207,8 +227,10 @@ getMemberType (StructDefinition (_, memberList)) name =
 showDt :: DataType -> String
 showDt (dataTypeName, ptrList) = dataTypeName ++ concatMap (\x -> if x > 0 then "[" ++ show x ++ "]" else "*") ptrList
 
-raiseFailure :: String -> StateT s (Either String) a
-raiseFailure msg = lift (Left msg)
+raiseFailure :: String -> Int -> Int -> StateT s (Either FailureInfo) a
+raiseFailure msg begin end = lift (Left (FailureInfo msg (begin, end)))
+raiseFailureLoc :: String -> SourceLoc -> StateT s (Either FailureInfo) a
+raiseFailureLoc msg = uncurry (raiseFailure msg) . (srcBegin &&& srcEnd)
 
 baseTypes :: S.Set String
 baseTypes = S.fromList ["void", "char", "short", "int", "long", "float", "bool"]
@@ -217,7 +239,7 @@ isBaseType :: DataType -> Bool
 isBaseType (name, _) = S.member name baseTypes
 
 initialState :: String -> ParseState
-initialState progStr = ParseState ([], progStr, 0) baseTypes [] [] [M.fromList (map (, TypeSym) $ S.toList baseTypes)]
+initialState progStr = ParseState ([], progStr, (0, 0)) baseTypes [] [] [M.fromList (map (, TypeSym) $ S.toList baseTypes)] 0
 
 getIdentifierType :: String -> SymbolMap -> SymbolType
 getIdentifierType _ []          = UnkSym
@@ -232,11 +254,13 @@ data ParseState = ParseState
     , funcList :: [FunctionDefinition]
     , structList :: [StructDefinition]
     , symbolMap :: SymbolMap  -- List of all taken symbol names + kind
+    , currentNodeLexStart :: Int
     }
 
 popToken :: ParseState -> (Token, ParseState)
-popToken (ParseState (h:t, rest, clt) env funcs structs syms) = (fst h, ParseState (t, rest, clt + snd h) env funcs structs syms)
-popToken (ParseState ([], rest, clt) env funcs structs syms) = error "popToken called on empty token list"
+popToken (ParseState (h:t, rest, (curclt, prevclt)) env funcs structs syms lp) =
+    (fst h, ParseState (t, rest, (curclt + snd h, curclt)) env funcs structs syms lp)
+popToken (ParseState ([], rest, clt) env funcs structs syms lp) = error "popToken called on empty token list"
 
 isIdentifier :: Token -> Bool
 isIdentifier (Identifier _) = True
@@ -285,3 +309,6 @@ operatorMatches _ _            = False
 keywordMatches :: String -> Token -> Bool
 keywordMatches v (Keyword k) = v == k
 keywordMatches _ _           = False
+
+dropAndCount :: (a -> Bool) -> [a] -> ([a], Int)
+dropAndCount fn = span fn >>> first (arr length) >>> swap

@@ -4,6 +4,7 @@ module CompilerShow
 , FunctionDefinition(..)
 , StructDefinition(..)
 , ExprType(..)
+, Token(..)
 ) where
 
 import CompilerShared
@@ -119,11 +120,11 @@ showSyntaxTree = unlines . showTreeR
             in  header ++ exprLns
         (annot, ExprNode e) -> showExprTreeLn e
 
-showDeclList :: String -> [(DataType, String)] -> String
+showDeclList :: String -> DeclList -> String
 showDeclList inter = L.intercalate inter . map (\ (t, n) -> show (ExprType t) ++ (' ':n))
 
 instance Show FunctionDefinition where
-    show (FunctionDefinition rt name params root) =
+    show (FunctionDefinition rt name params root locs) =
         show (ExprType rt) ++ (' ':name ++ ('(':paramsStr ++ (")\n" ++ showSyntaxTree root)))
       where
         paramsStr = showDeclList ", " params
@@ -136,3 +137,13 @@ instance Show StructDefinition where
 
 instance Show ExprType where
     show (ExprType (tp, pList)) = tp ++ concatMap (\i -> if i == 0 then "*" else "[" ++ show i ++ "]") pList
+
+instance Show Token where
+    show (Identifier id) = "id '" ++ id ++ "'"
+    show (Constant ct) = "constant '" ++ show ct ++ "'"
+    show (Operator op) = op
+    show (Control cnt) = cnt
+    show (Punctuation p) = p
+    show (Keyword kw) = kw
+    show Eof = "eof"
+    show Invalid = "Invalid token"

@@ -1,6 +1,8 @@
 module Parser where
 
 import CompilerShared
+import CompilerShow
+import Control.Arrow
 import Control.Monad
 import Control.Monad.Loops ( iterateUntilM, whileM_, whileM, untilM )
 import Control.Monad.Trans
@@ -13,8 +15,6 @@ import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Data.Set as S
 
-type ParameterList = [(DataType, String)]
-
 getTypeEnv :: ParseAction TypeEnv
 getTypeEnv = typeEnv <$> get
 getLexerState :: ParseAction LexerState
@@ -24,37 +24,50 @@ getSymbolMap = symbolMap <$> get
 
 pushSymbolEnv :: ParseAction ()
 pushSymbolEnv = do
-    ParseState lexer typeEnv funcs structs syms <- get
-    put $ ParseState lexer typeEnv funcs structs (M.empty:syms)
+    ParseState lexer typeEnv funcs structs syms lp <- get
+    put $ ParseState lexer typeEnv funcs structs (M.empty:syms) lp
 
 popSymbolEnv :: ParseAction ()
 popSymbolEnv = do
-    ParseState lexer typeEnv funcs structs syms <- get
-    put $ ParseState lexer typeEnv funcs structs (tail syms)
+    ParseState lexer typeEnv funcs structs syms lp <- get
+    put $ ParseState lexer typeEnv funcs structs (tail syms) lp
 
 getLexPosition :: ParseAction Int
 getLexPosition = do
-    (t, rest, clt) <- lexerState <$> get
+    (t, rest, (clt, plt)) <- lexerState <$> get
     return clt
+
+getPrevLexPosition :: ParseAction Int
+getPrevLexPosition = do
+    (t, rest, (clt, plt)) <- lexerState <$> get
+    return plt
+
+setCurrentLexStart :: Int -> ParseAction ()
+setCurrentLexStart pos = do
+    ParseState lexer typeEnv funcs structs syms _ <- get
+    put $ ParseState lexer typeEnv funcs structs syms pos
+
+raiseFailureHere :: String -> ParseAction a
+raiseFailureHere why = join $ raiseFailure why <$> (currentNodeLexStart <$> get) <*> getPrevLexPosition
 
 insertSymbol :: String -> SymbolType -> ParseAction ()
 insertSymbol symName sym = do
-    when (S.member symName baseTypes) (raiseFailure $ "Can't declare reserved typename " ++ symName)
-    ParseState lexer typeEnv funcs structs syms <- get
-    put $ ParseState lexer typeEnv funcs structs (M.insert symName sym (head syms) : tail syms)
+    when (S.member symName baseTypes) (raiseFailureHere $ "Can't declare reserved typename " ++ symName)
+    ParseState lexer typeEnv funcs structs syms lp <- get
+    put $ ParseState lexer typeEnv funcs structs (M.insert symName sym (head syms) : tail syms) lp
 
 -- Lexes a new token, adding it to the LexerState
 -- Returns the newly lexed token
 lexNewToken :: ParseAction Token
 lexNewToken = do
-    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms <- get
+    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms lp <- get
     let (newTok, numParsed, restProg) = lexStringSingle typeEnv progStr
-    put $ ParseState (cacheTok ++ [(newTok, numParsed)], restProg, clt) typeEnv funcs structs syms
+    put $ ParseState (cacheTok ++ [(newTok, numParsed)], restProg, clt) typeEnv funcs structs syms lp
     return newTok
 
 scanToken :: ParseAction Token
 scanToken = do
-    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms <- get
+    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms _ <- get
     when (null cacheTok) (void lexNewToken)
     state popToken
 
@@ -91,30 +104,33 @@ extractInner (Punctuation s) = s
 extractInner _               = error "Invalid call"
 
 -- Generic helpers to validate a token given a predicate (and extract)
-extractStrIfValid :: (Token -> Bool) -> Token -> ParseAction String
-extractStrIfValid check token =
+extractStrIfValid :: (Token -> Bool) -> String -> Token -> ParseAction String
+extractStrIfValid check tokenClass token =
     if check token
       then return (extractInner token)
-      else raiseFailure "Failed to extract valid token"
-checkTokenPredicate :: (Token -> Bool) -> Token -> ParseAction ()
-checkTokenPredicate check token = unless (check token) (raiseFailure "Token validation failed")
+      else raiseFailureHere $ "Tried to extract " ++ tokenClass ++ " token, but got " ++ show token
+checkTokenPredicate :: (Token -> Bool) -> String -> Token -> ParseAction ()
+checkTokenPredicate check expected token =
+    unless
+      (check token)
+      (raiseFailureHere $ "Token validation failed, expected \"" ++ expected ++ "\" but got " ++ show token)
 
 -- Helpers to validate several tokens, raises error if validation fails
 extractIdentifierIfValid :: Token -> ParseAction String
-extractIdentifierIfValid = extractStrIfValid isIdentifier
+extractIdentifierIfValid = extractStrIfValid isIdentifier "identifier"
 extractOperatorIfValid :: Token -> ParseAction String
-extractOperatorIfValid = extractStrIfValid isOperator
+extractOperatorIfValid = extractStrIfValid isOperator "operator"
 extractConstantIfValid :: Token -> ParseAction ConstantType
 extractConstantIfValid (Constant val) = return val
-extractConstantIfValid _              = raiseFailure "Expected constant token"
+extractConstantIfValid _              = raiseFailureHere "Expected constant token"
 validatePunctuation :: String -> Token -> ParseAction ()
-validatePunctuation val = checkTokenPredicate (punctuationMatches val)
+validatePunctuation val = checkTokenPredicate (punctuationMatches val) val
 validateControl :: String -> Token -> ParseAction ()
-validateControl val = checkTokenPredicate (controlMatches val)
+validateControl val = checkTokenPredicate (controlMatches val) val
 validateOperator :: String -> Token -> ParseAction ()
-validateOperator val = checkTokenPredicate (operatorMatches val)
+validateOperator val = checkTokenPredicate (operatorMatches val) val
 validateKeyword :: String -> Token -> ParseAction ()
-validateKeyword val = checkTokenPredicate (keywordMatches val)
+validateKeyword val = checkTokenPredicate (keywordMatches val) val
 
 -- Helpers to consume a specific token (and extract contents for id/type)
 scanIdentifier :: ParseAction String
@@ -138,7 +154,7 @@ shouldContinueParse = do
     headToken <- peekToken
     return $ headToken /= Eof
 
-parseProg :: String -> Either String Program
+parseProg :: String -> Either FailureInfo Program
 parseProg progStr =
     fmap (\finalState -> (funcList finalState, structList finalState)) (execStateT whatToExecute (initialState progStr))
   where
@@ -150,18 +166,18 @@ parseTopLevel = do
     case token of 
         Keyword "struct" -> parseAndInsertStruct
         Identifier _ -> parseAndInsertFunction
-        _ -> raiseFailure "Unexpected top level token"
+        _ -> raiseFailureHere "Unexpected top level token"
   where
     parseAndInsertFunction :: ParseAction ()
     parseAndInsertFunction = do
         func <- parseFunction
-        ParseState lexer env funcs structs syms <- get
-        put $ ParseState lexer env (funcs ++ [func]) structs syms
+        ParseState lexer env funcs structs syms lp <- get
+        put $ ParseState lexer env (funcs ++ [func]) structs syms lp
     parseAndInsertStruct :: ParseAction ()
     parseAndInsertStruct = do
         struct@(StructDefinition (name, _)) <- parseStruct
-        ParseState lexer env funcs structs syms <- get
-        put $ ParseState lexer (S.insert name env) funcs (structs ++ [struct]) syms
+        ParseState lexer env funcs structs syms lp <- get
+        put $ ParseState lexer (S.insert name env) funcs (structs ++ [struct]) syms lp
 
 parseStruct :: ParseAction StructDefinition
 parseStruct = do
@@ -182,43 +198,59 @@ parseStruct = do
         eatPunctuation ";"
         return ((memberTypeName, arrayList ++ memberPtrList), id)
 
+seqPair :: Monad m => (m a, m b) -> m (a, b)
+seqPair (mFirst, mSecond) = (,) <$> mFirst <*> mSecond
+seqTrip :: Monad m => (m a, m b, m c) -> m (a, b, c)
+seqTrip (mFirst, mSecond, mThird) = (,,) <$> mFirst <*> mSecond <*> mThird
+
 -- Return a parsed function as a SyntaxNode
 parseFunction :: ParseAction FunctionDefinition 
 parseFunction = do
-    typeName <- parseType
-    id <- scanIdentifier
+    (typeBegin, typeName) <- seqPair (getLexPosition, parseType)
+    (idBegin, id, idEnd) <- seqTrip (getLexPosition, scanIdentifier, getLexPosition)
     insertSymbol id FuncSym 
     pushSymbolEnv
     eatPunctuation "("
-    paramList <- parseParamList
+    (paramList, paramLocs) <- parseParamList
     eatPunctuation ")"
     blockNode <- doAnnotate parseBlock
     popSymbolEnv
-    return $ FunctionDefinition typeName id paramList blockNode
+    let fAnnot = FunctionAnnotation {
+            returnTypeLoc = SourceLoc typeBegin idBegin,
+            funcNameLoc = SourceLoc idBegin idEnd,
+            paramsLoc = paramLocs
+        }
+    return $ FunctionDefinition typeName id paramList blockNode fAnnot
 
 
-parseParamList :: ParseAction ParameterList
+parseParamList :: ParseAction (DeclList, [SourceLoc])
 parseParamList = do
     typeToken <- peekToken
     syms <- getSymbolMap
     if isTypeName syms typeToken
     then doActualParseParamList
-      else return []
+      else return ([], [])
   where
     -- Parses the full param list, given there is at least one parameter
-    doActualParseParamList :: ParseAction ParameterList
+    doActualParseParamList :: ParseAction (DeclList, [SourceLoc])
     doActualParseParamList = do
+        paramBeg <- getLexPosition
         typeName <- parseType
         id <- scanIdentifier
-        ((typeName, id):) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaParam
+        paramEnd <- getLexPosition
+        let loc = SourceLoc paramBeg paramEnd
+        unzip . (((typeName, id), loc):) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaParam
       where
         -- Parses a single ", typename identifier"
-        parseCommaParam :: ParseAction (DataType, String)
+        parseCommaParam :: ParseAction ((DataType, String), SourceLoc)
         parseCommaParam = do
             eatToken
+            paramBeg <- getLexPosition
             typeName <- parseType
             id <- scanIdentifier
-            return (typeName, id)
+            paramEnd <- getLexPosition
+            let loc = SourceLoc paramBeg paramEnd
+            return ((typeName, id), loc)
 
 -- block = '{' stmt* '}'
 parseBlock :: ParseAction (SyntaxNodeF SyntaxNode)
@@ -295,11 +327,12 @@ parseStatement = do
             eatControl "break"
             eatPunctuation ";"
             return BreakNode
-        | otherwise               = raiseFailure "Unexpected token when parsing statement"
+        | otherwise               = raiseFailureHere "Unexpected token when parsing statement"
 
 doAnnotate :: ParseAction (SyntaxNodeF SyntaxNode) -> ParseAction SyntaxNode
 doAnnotate action = do
     startPos <- getLexPosition
+    setCurrentLexStart startPos
     rawNode <- action
     endPos <- getLexPosition
     return $ annotSyntax startPos endPos rawNode
@@ -337,7 +370,7 @@ parseForInit = getSymbolMap >>= \syms -> peekToken >>= parseForInitLookahead sym
         | isTypeName syms lookahead        = parseDeclaration
         | isExpression lookahead           = parseWrapExpression
         | punctuationMatches ";" lookahead = return EmptyNode
-        | otherwise                        = raiseFailure "Unexpected token in for loop init"
+        | otherwise                        = raiseFailureHere "Unexpected token in for loop init"
 
 parseForExpr :: ParseAction (SyntaxNodeF SyntaxNode)
 parseForExpr = peekToken >>= parseForExprLookahead
@@ -347,7 +380,7 @@ parseForExpr = peekToken >>= parseForExprLookahead
         | isExpression lookahead           = parseWrapExpression
         | punctuationMatches ";" lookahead ||
           punctuationMatches ")" lookahead = return EmptyNode
-        | otherwise                        = raiseFailure "Unexpected token in for loop expression"
+        | otherwise                        = raiseFailureHere "Unexpected token in for loop expression"
 
 parseForLoop :: ParseAction (SyntaxNodeF SyntaxNode)
 parseForLoop = do
@@ -400,7 +433,7 @@ isAssignmentOperator (Operator op) = S.member op assignOpsList
 isAssignmentOperator _             = False
 
 scanAssignmentOperator :: ParseAction ()
-scanAssignmentOperator = scanToken >>= \x -> unless (isAssignmentOperator x) (raiseFailure "Expected assignment token operator")
+scanAssignmentOperator = scanToken >>= \x -> unless (isAssignmentOperator x) (raiseFailureHere "Expected assignment token operator")
 
 parseAssignment :: ParseAction Expr
 parseAssignment = do
@@ -410,8 +443,7 @@ parseAssignment = do
       then do
         lhs <- parseLvalue
         assignOp <- scanToken
-        subExpr <- parseAssignment
-        return $ annotExprEmpty $ AssignmentNode (getAssignOp assignOp) lhs subExpr
+        annotExprEmpty . AssignmentNode (getAssignOp assignOp) lhs <$> parseAssignment
       else parseLogicOr
   where
     getAssignOp (Operator o)
@@ -430,8 +462,7 @@ parseLvalue = do
     if operatorMatches "*" token
     then do
         eatToken
-        indirectionNode <- parseLvalue
-        return $ annotExprEmpty (UnaryOpNode Dereference indirectionNode)
+        annotExprEmpty . UnaryOpNode Dereference <$> parseLvalue
     else
         parseIndirection
 
@@ -446,7 +477,7 @@ parseOpPrecedence parseAction opCombine = do
     equalPrecedenceList <- whileM shouldContinue execMatched
     return $ L.foldl' (\a (node, combine) -> combine a node) init equalPrecedenceList
   where
-    checks = map (\(op, combine) -> (operatorMatches op, combine)) opCombine
+    checks = map (first operatorMatches) opCombine
     shouldContinue :: ParseAction Bool
     shouldContinue = do
         nextTok <- peekToken
@@ -547,7 +578,7 @@ parseIndirection = do
                      eatOperator "->"
                      idNode <- scanIdentifier <&> annotExprEmpty . StructMemberNode
                      tryParseArray idNode >>= \rhs -> return (rhs, True)
-               | otherwise                      -> raiseFailure "Unexpected token when parsing member access"
+               | otherwise                      -> raiseFailureHere "Unexpected token when parsing member access"
 
 parseBaseExpr :: ParseAction Expr
 parseBaseExpr = do
@@ -555,7 +586,7 @@ parseBaseExpr = do
     if | isIdentifier lookahead           -> parseId
        | isConstant lookahead             -> parseConstant
        | punctuationMatches "(" lookahead -> parseParenthesis
-       | otherwise                        -> raiseFailure "Unexpected type in base expression"
+       | otherwise                        -> raiseFailureHere "Unexpected token in base expression"
   where
     parseId :: ParseAction Expr
     parseId = annotExprEmpty . IdentifierNode <$> scanIdentifier
@@ -597,9 +628,9 @@ parseArraySpec = do
         case constant of
             IntConstant v -> do
                 eatPunctuation "]"
-                when (v <= 0) (raiseFailure "Array sizes must be greater than 0")
+                when (v <= 0) (raiseFailureHere "Array sizes must be greater than 0")
                 return (fromIntegral v)
-            _             -> raiseFailure "Non-integer type used in array index"
+            _             -> raiseFailureHere "Non-integer type used in array index"
 
 parseType :: ParseAction DataType
 parseType = do

@@ -35,7 +35,7 @@ lookupVarFailure :: String -> GeneratorAction VarInfo
 lookupVarFailure id = do
     maybeVar <- lookupVar id <$> (environment <$> get)
     maybe
-      (raiseFailure $ "Undefined id " ++ id)
+      (raiseFailure ("Undefined id " ++ id) 0 0)
       return
       maybeVar
 
@@ -46,7 +46,7 @@ data GeneratorState = GeneratorState
     , environment :: Environment
     } deriving Show
 
-type GeneratorAction = StateT GeneratorState (Either String)
+type GeneratorAction = StateT GeneratorState (Either FailureInfo)
 
 unlessM :: Monad m => m Bool -> m () -> m ()
 unlessM test def = test >>= (`unless` def)
@@ -68,14 +68,14 @@ pushEnvironment isLoop =
 popEnvironment :: GeneratorAction ()
 popEnvironment = get >>= putEnvironment . tail . environment
 
-createVariable :: DataType -> GeneratorAction VarInfo
-createVariable dataType = get >>= createVarHelper dataType . structMap
+createVariable :: DataType -> SourceLoc -> GeneratorAction VarInfo
+createVariable dataType sl = get >>= createVarHelper dataType . structMap
   where
     createVarHelper :: DataType -> StructMap -> GeneratorAction VarInfo
     createVarHelper dataType@(typename, _) structs
         | isPrimitiveType dataType      = return $ PrimitiveVar dataType
         | isStructType dataType structs = return $ StructVar dataType
-        | otherwise                     = raiseFailure $ "Invalid typename " ++ typename
+        | otherwise                     = raiseFailureLoc ("Invalid typename " ++ typename) sl
 
 insertIntoEnv :: String -> VarInfo -> GeneratorAction ()
 insertIntoEnv varName varInfo =
@@ -85,10 +85,14 @@ insertIntoEnv varName varInfo =
     insert varName varInfo ((EnvBlock loop envMap):rest) = EnvBlock loop (M.insert varName varInfo envMap):rest
     insert _ _ [] = []
 
-validateInLoop :: GeneratorAction ()
-validateInLoop = get >>= (\st -> unless (envInLoop $ environment st) (raiseFailure "Not inside a loop"))
+validateInLoop :: SourceLoc -> GeneratorAction ()
+validateInLoop sl = do
+    env <- environment <$> get
+    unless
+      (envInLoop env)
+      (raiseFailureLoc "Not contained in a loop" sl)
 
-validateProgram :: Program -> Either String Program
+validateProgram :: Program -> Either FailureInfo Program
 validateProgram (funcs, structs) =
     evalStateT
       (validateAllStructs structs >> validateAllFunctions funcs >>= \x -> return (x, structs))
@@ -99,37 +103,35 @@ validateProgram (funcs, structs) =
         validateAllFunctions :: [FunctionDefinition] -> GeneratorAction [FunctionDefinition]
         validateAllFunctions = mapM (\x -> validateFunction x >>= \newFunc -> addFunctionToEnvironment x >> return newFunc)
         addFunctionToEnvironment :: FunctionDefinition -> GeneratorAction ()
-        addFunctionToEnvironment (FunctionDefinition rtype name params _) =
+        addFunctionToEnvironment (FunctionDefinition rtype name params _ _) =
             insertIntoEnv name (FunctionVar rtype params)
         validateFunction :: FunctionDefinition -> GeneratorAction FunctionDefinition
-        validateFunction (FunctionDefinition rtype fname params body) = do
+        validateFunction (FunctionDefinition rtype fname params body sl) = do
             pushEnvironment False
-            addFunctionParameters params
+            addFunctionParameters params $ paramsLoc sl
             insertIntoEnv "$currentFunction" (FunctionVar rtype [])
             body <- validateSyntaxNode body
             unless (isVoidType rtype) (validateReturns body)
             popEnvironment
-            return $ FunctionDefinition rtype fname params body
+            return $ FunctionDefinition rtype fname params body sl
           where
             -- Ensmarten me, you can technically have dead code at the end
             validateReturns :: SyntaxNode -> GeneratorAction ()
-            validateReturns node = return () {-$ case snd $ getCompose $ unFix node of
-                (SeqNode _ retNode) -> case snd $ getCompose $ unFix retNode of
-                    ReturnNode _ -> return ()
-                    _            -> raiseFailure $ "Function " ++ fname ++ " did not return a value"
-                _                -> raiseFailure $ "Function " ++ fname ++ " did not return a value"-}
-            addFunctionParameters :: [(DataType, String)] -> GeneratorAction ()
-            addFunctionParameters = mapM_ (\(dataType, id) -> createVariable dataType >>= insertIntoEnv id)
+            validateReturns node = return ()  -- TODO: this
+            addFunctionParameters :: DeclList -> [SourceLoc] -> GeneratorAction ()
+            addFunctionParameters = (fmap . fmap) mapZip zip
+              where
+                mapZip = mapM_ (\((dataType, id), sl) -> createVariable dataType sl >>= insertIntoEnv id)
 
 validateStruct :: StructDefinition -> GeneratorAction ()
 validateStruct (StructDefinition (name, memberList)) = do
     curStructs <- structMap <$> get
     unless
       (all (validateMember curStructs) memberList && membersUnique (map snd memberList))
-      (raiseFailure $ "Validating struct " ++ name ++ " failed")
+      (raiseFailure ("Validating struct " ++ name ++ " failed") 0 0)
     when
       (null memberList)
-      (raiseFailure $ "Struct " ++ name ++ " has no members")
+      (raiseFailure ("Struct " ++ name ++ " has no members") 0 0)
 
 validateMember :: StructMap -> (DataType, String) -> Bool
 validateMember structs (datatype@(typename, _), id) = isPrimitiveType datatype || M.member typename structs
@@ -193,14 +195,36 @@ validateSyntaxNode node = do
     validateHelper :: (SourceLoc, SyntaxNodeF SyntaxNode) -> GeneratorAction (SourceLoc, SyntaxNodeF SyntaxNode)
     validateHelper = mapM validateSyntaxNodeF
 
+    nodeLoc :: SourceLoc
+    nodeLoc = fst $ getCompose $ unFix node
+
+    -- Failure messages for syntax nodes
+    failCantCastCondition :: DataType -> GeneratorAction ()
+    failCantCastCondition condType =
+        raiseFailureLoc ("Cannot convert for condition expression from " ++ showDt condType ++ " to bool") nodeLoc
+    failCantCastReturn :: DataType -> DataType -> GeneratorAction ()
+    failCantCastReturn t0 t1 =
+        raiseFailureLoc ("Return type " ++ showDt t0 ++ " does not match function type " ++ showDt t1) nodeLoc
+    failCantShadow :: String -> GeneratorAction ()
+    failCantShadow id =
+        raiseFailureLoc ("Cannot redeclare variable with name " ++ id) nodeLoc
+    failCantDeclareVoid :: String -> GeneratorAction ()
+    failCantDeclareVoid id = raiseFailureLoc ("Cannot declare the variable " ++ id ++ " with type void") nodeLoc
+    failCantCastDef :: DataType -> DataType -> GeneratorAction ()
+    failCantCastDef t0 t1 =
+        raiseFailureLoc ("Cannot cast definition expression from " ++ showDt t0 ++ " to " ++ showDt t1) nodeLoc
+    failExprInvalid :: Expr -> GeneratorAction ()
+    failExprInvalid expr =
+        raiseFailureLoc ("Expression typecheck failed. Expression tree:\n---\n" ++ showExprTree expr ++ "---\n") nodeLoc
+
     getExprDecltype :: SyntaxNode -> GeneratorAction DataType
     getExprDecltype node = case snd $ getCompose $ unFix node of 
         ExprNode expr -> return $ typeOf expr
-        _             -> raiseFailure "Expected an expression"
+        _             -> raiseFailureLoc "Expected an expression" nodeLoc
     getExprRoot :: SyntaxNode -> GeneratorAction Expr
     getExprRoot node = case snd $ getCompose $ unFix node of 
         ExprNode expr -> return expr
-        _             -> raiseFailure "Expected an expression"
+        _             -> raiseFailureLoc "Expected an expression" nodeLoc
 
     trueExpr :: SyntaxNode
     trueExpr = annotSyntaxEmpty (ExprNode $ annotExpr boolType $ LiteralNode (BoolConstant True))
@@ -221,7 +245,7 @@ validateSyntaxNode node = do
         let condTypeName = showDt condType
         unless
           (isImplicitCastAllowed boolType condType)
-          (raiseFailure $ "Cannot convert while condition expression from " ++ condTypeName ++ " to bool")
+          (raiseFailureLoc ("Cannot convert while condition expression from " ++ condTypeName ++ " to bool") nodeLoc)
         -- TODO: maybe add implicit casts to bool if we ever change our minds?
         pushEnvironment True
         block <- validateSyntaxNode block
@@ -236,10 +260,9 @@ validateSyntaxNode node = do
                                                then trueExpr
                                                else validCond
         condType <- getExprDecltype condition
-        let condTypeName = showDt condType
         unless
           (isImplicitCastAllowed boolType condType)
-          (raiseFailure $ "Cannot convert for condition expression from " ++ condTypeName ++ " to bool")
+          (failCantCastCondition condType)
         -- TODO: maybe add implicit casts to bool if we ever change our minds?
         expr <- validateSyntaxNode expr
         block <- validateSyntaxNode block
@@ -248,10 +271,9 @@ validateSyntaxNode node = do
     validateSyntaxNodeF (IfNode condition block) = do
         condition <- validateSyntaxNode condition
         condType <- getExprDecltype condition
-        let condTypeName = showDt condType
         unless
           (isImplicitCastAllowed boolType condType)
-          (raiseFailure $ "Cannot convert if condition expression from " ++ condTypeName ++ " to bool")
+          (failCantCastCondition condType)
         -- TODO: maybe add implicit casts to bool if we ever change our minds?
         pushEnvironment False
         block <- validateSyntaxNode block
@@ -263,7 +285,7 @@ validateSyntaxNode node = do
         let condTypeName = showDt condType
         unless
           (isImplicitCastAllowed boolType condType)
-          (raiseFailure $ "Cannot convert if condition expression from " ++ condTypeName ++ " to bool")
+          (failCantCastCondition condType)
         -- TODO: maybe add implicit casts to bool if we ever change our minds?
         pushEnvironment False -- TODO: remove unnecessary blocks
         block <- validateSyntaxNode block
@@ -276,11 +298,9 @@ validateSyntaxNode node = do
         exprType <- getExprDecltype expr
         funcNode <- lookupVarFailure "$currentFunction"
         let (FunctionVar funcRetType _) = funcNode
-            exprTypeName = showDt exprType
-            funcRetTypeName = showDt funcRetType
         unless
           (isImplicitCastAllowed funcRetType exprType)
-          (raiseFailure $ "Return type " ++ exprTypeName ++ " does not match function type " ++ funcRetTypeName)
+          (failCantCastReturn exprType funcRetType)
         if exprType /= funcRetType
           then do
             -- Take the current ExprNode, get its Expr, inject a cast, reannotate, and return
@@ -288,10 +308,10 @@ validateSyntaxNode node = do
                  (getExprRoot expr)
           else return $ ReturnNode expr
     validateSyntaxNodeF ContinueNode = do
-        validateInLoop
+        validateInLoop nodeLoc
         return ContinueNode
     validateSyntaxNodeF BreakNode = do
-        validateInLoop
+        validateInLoop nodeLoc
         return BreakNode
     validateSyntaxNodeF (BlockNode block) = do
         pushEnvironment False
@@ -299,25 +319,17 @@ validateSyntaxNode node = do
         popEnvironment
         return $ BlockNode block
     validateSyntaxNodeF sn@(DeclarationNode declaredType id) = do
-        unlessM
-          (canShadow id)
-          (raiseFailure $ "Cannot redeclare variable with name " ++ id)
-        when
-          (declaredType == voidType)
-          (raiseFailure $ "Cannot declare the variable " ++ id ++ " with type void")
-        createVariable declaredType >>= insertIntoEnv id
+        unlessM (canShadow id) (failCantShadow id)
+        when (declaredType == voidType) (failCantDeclareVoid id)
+        createVariable declaredType nodeLoc >>= insertIntoEnv id
         return sn
     validateSyntaxNodeF (DefinitionNode declaredType id expr) = do
-        unlessM (canShadow id) (raiseFailure $ "Cannot redeclare variable with name " ++ id)
-        when (fst declaredType == "void") (raiseFailure $ "Cannot declare the variable " ++ id ++ " with type void")
-        createVariable declaredType >>= insertIntoEnv id
+        unlessM (canShadow id) (failCantShadow id)
+        when (declaredType == voidType) (failCantDeclareVoid id)
+        createVariable declaredType nodeLoc >>= insertIntoEnv id
         expr <- validateSyntaxNode expr
         exprType <- getExprDecltype expr
-        let exprTypeName = showDt exprType
-            varTypeName = showDt declaredType
-        unless
-          (isImplicitCastAllowed declaredType exprType)
-          (raiseFailure $ "Cannot cast definition expression from " ++ exprTypeName ++ " to " ++ varTypeName)
+        unless (isImplicitCastAllowed declaredType exprType) (failCantCastDef declaredType exprType)
         if exprType /= declaredType
           then do
             fmap (DefinitionNode declaredType id . copyAnnot expr . injectCast declaredType)
@@ -327,9 +339,7 @@ validateSyntaxNode node = do
         expression <- computeDecltype <$> (environment <$> get)
                                       <*> (structMap <$> get)
                                       <*> pure expression
-        when
-          (invalidType == typeOf expression)
-          (raiseFailure $ "Invalid expression! Here:\n---\n" ++ showExprTree expression ++ "---\n")
+        when (invalidType == typeOf expression) (failExprInvalid expression)
         return $ ExprNode expression
 
 -- See below for binary operation casting rules
@@ -358,6 +368,7 @@ binaryTypeResult structs op lhsType rhsType
     | op == LessThanOrEqual    = decideRelCompare
     | op == Or                 = decideLogical
     | op == And                = decideLogical
+    | otherwise                = invalidPair
   where
     invalidPair = dupe3 invalidType
     typeFormMatches tp1 tp2 = fst tp1 == fst tp2 && length (snd tp1) == length (snd tp2)
@@ -416,6 +427,7 @@ unaryTypeResult op subType
     | op == Not              = decideNot subType
     | op == Reference        = decideReference subType
     | op == Dereference      = decideDereference subType
+    | otherwise              = invalidType
   where
     decideNegate :: DataType -> DataType
     decideNegate tp

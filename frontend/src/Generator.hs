@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 module Generator where
 
 import CompilerShared
@@ -41,11 +42,13 @@ exprToDNA dataType
     | dataType == intType    = Int32 1
     | dataType == longType   = Int64 1
     | dataType == floatType  = Float 1
+    | otherwise              = error "Invalid datatype"
 
 data DNAOperand
     = Variable Bool DNAVariable
     | MemoryRef Bool DNAVariable Int DNAType
     | Immediate Rational DNAType
+    | StructMemberFixup String DNAType
     | None
     deriving Show
 
@@ -72,7 +75,7 @@ data DNAInstruction
     | Cmp DNAOperand DNAOperand
     | Jmp JmpCondition DNALabel
     | Param DNAOperand
-    | Call DNALabel DNAOperand
+    | Call String DNAOperand
     | ReturnVal DNAOperand
     | ReturnVoid
     | ArrayCopy DNAOperand DNAOperand Int
@@ -86,16 +89,31 @@ type TempFreeList = M.Map DNAType [DNAVariable]
 type LocalEnv = M.Map String DNAVariable
 type TempVarList = (TempFreeList, Int)
 type GeneratorAction = State GeneratorState
+type StructMap = M.Map String StructDefinition
 
 data GeneratorState = GeneratorState
     { labelIdx :: Int
     , freeVars :: TempVarList
     , env :: LocalEnv
+    , structMap :: StructMap
     }
     deriving Show
 
-initialState :: GeneratorState
-initialState = GeneratorState 0 (M.empty, 0) M.empty
+lookupStruct :: String -> GeneratorAction StructDefinition
+lookupStruct structName = do
+    structs <- structMap <$> get
+    let struct = M.lookup structName structs
+    return $ fromMaybe (error "Failed to lookup struct") struct
+
+getMemberOffset :: String -> StructDefinition -> Int
+getMemberOffset name struct = 0
+    --L.foldl' (\(offs, _) (tp, name) -> (offs + datatypeSize tp, name)) (0, "")
+
+initialState :: [StructDefinition] -> GeneratorState
+initialState defs = GeneratorState 0
+                                  (M.empty, 0)
+                                   M.empty
+                                 $ M.fromList (map (fst . getStructDef &&& id) defs)
 
 setEnvironment :: LocalEnv -> GeneratorAction ()
 setEnvironment _ = return ()
@@ -123,49 +141,50 @@ getOperandType _                = error "getOperandType on Operand with 'None', 
 
 addVar :: (String -> DNAType -> DNAVariable) -> String -> String -> GeneratorAction ()
 addVar constructor typeName varName = do
-    GeneratorState lblCtr freeVars envMap <- get
+    GeneratorState lblCtr freeVars envMap structs <- get
     let var = constructor varName $ parseDNAType typeName 1
-    put $ GeneratorState lblCtr freeVars (M.insert varName var envMap)
+    put $ GeneratorState lblCtr freeVars (M.insert varName var envMap) structs
 addLocalVar :: String -> String -> GeneratorAction ()
 addLocalVar = addVar Local
 addParameterVar :: String -> String -> GeneratorAction ()
 addParameterVar = addVar Input
-getDNAType :: DataType -> GeneratorAction DNAType
-getDNAType (typeName, ptrList) = do
-    let baseTypeConstructor = if null ptrList || last ptrList > 0
-        then parseDNAType typeName
-        else Int64
-    let totalElems = product $ takeWhile (>0) ptrList
-    return $ baseTypeConstructor totalElems
+getDNAType :: DataType -> DNAType
+getDNAType (typeName, ptrList) =
+    let baseTypeConstructor =
+          if null ptrList || last ptrList > 0
+            then parseDNAType typeName
+            else Int64
+        totalElems = product $ takeWhile (>0) ptrList
+    in  baseTypeConstructor totalElems
 
 getTempVar :: DNAType -> GeneratorAction DNAVariable
 getTempVar typeName = do
-    GeneratorState lblCtr (tmpList, tmpCount) envMap <- get
+    GeneratorState lblCtr (tmpList, tmpCount) envMap structs <- get
     if M.member typeName tmpList
       then do
         let (Just freeVars) = M.lookup typeName tmpList
         if not $ null freeVars
           then do
-            put $ GeneratorState lblCtr (M.insert typeName (tail freeVars) tmpList, tmpCount) envMap
+            put $ GeneratorState lblCtr (M.insert typeName (tail freeVars) tmpList, tmpCount) envMap structs
             return $ head freeVars
           else addNewTemp typeName
       else addNewTemp typeName
   where
     addNewTemp :: DNAType -> GeneratorAction DNAVariable
     addNewTemp typeName = do
-        state (\(GeneratorState lblCtr (tmpMap, tmpCount) envMap) ->
+        state (\(GeneratorState lblCtr (tmpMap, tmpCount) envMap structs) ->
             let newVarName = 't' : show tmpCount
                 newVar = Temp newVarName typeName
                 newTmpList = M.findWithDefault [] typeName tmpMap
                 newTmpMap = M.insert typeName newTmpList tmpMap
                 newEnvMap = M.insert newVarName newVar envMap
-            in (newVar, GeneratorState lblCtr (newTmpMap, tmpCount + 1) newEnvMap))
+            in (newVar, GeneratorState lblCtr (newTmpMap, tmpCount + 1) newEnvMap structs))
 
 freeTempVar :: DNAVariable -> GeneratorAction ()
 freeTempVar var = do
-    GeneratorState lblCtr (tmpList, tmpCount) envMap <- get
+    GeneratorState lblCtr (tmpList, tmpCount) envMap structs <- get
     let result = insertVar var tmpList
-    when (isJust result) $ put $ GeneratorState lblCtr (fromJust result, tmpCount) envMap
+    when (isJust result) $ put $ GeneratorState lblCtr (fromJust result, tmpCount) envMap structs
   where
     insertVar :: DNAVariable -> TempFreeList -> Maybe TempFreeList
     insertVar var tmpMap = do
@@ -181,9 +200,9 @@ tryFreeOperand _ = return ()
 
 createLabel :: GeneratorAction DNAInstruction
 createLabel = do
-    GeneratorState ctr temps env <- get
+    GeneratorState ctr temps env structs <- get
     let newLbl = "l" ++ show ctr
-    put $ GeneratorState (ctr + 1) temps env
+    put $ GeneratorState (ctr + 1) temps env structs
     return $ Label newLbl
 
 generateIr :: SyntaxNode -> GeneratorAction (DNABlock, DNAOperand)
@@ -243,15 +262,16 @@ generateIr = generateIrHelper . snd . getCompose . unFix
         return newBlock
     generateIrHelper (DeclarationNode datatype id) = do
         localEnv <- env <$> get
-        dnaType <- getDNAType datatype
+        let dnaType = getDNAType datatype
         let var = Local id dnaType
         setEnvironment (M.insert id var localEnv)
         return ([], None)
 
 
 generateIrExpr :: Expr -> GeneratorAction (DNABlock, DNAOperand)
-generateIrExpr = (uncurry generateIrExprHelper) . (first dataType) . getCompose . unFix
+generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . unFix
   where
+    generateIrExprHelper :: DataType -> ExprF Expr -> GeneratorAction (DNABlock, DNAOperand)
     generateIrExprHelper exprType (BinaryOpNode Addition left right) = do
         (leftBlock, resultOp) <- generateIrExpr left
         (rightBlock, resultOp2) <- generateIrExpr right
@@ -471,3 +491,78 @@ generateIrExpr = (uncurry generateIrExprHelper) . (first dataType) . getCompose 
         env <- env <$> get
         let Just var = M.lookup name env
         return ([], Variable False var)
+    generateIrExprHelper exprType node@(LiteralNode lit) = do
+        case lit of
+            IntConstant v    -> return ([], Immediate (toRational v) $ Int64 1)
+            FloatConstant v  -> return ([], Immediate (toRational v) $ Float 1)
+            BoolConstant v   -> return ([], Immediate (if v then 1 else 0) $ Int8 1)
+            StringConstant v -> error "Strings not supported yet"
+    generateIrExprHelper exprType node@(FunctionCallNode name args) = do
+        instList <- mapM generateIrExpr args
+        let paramInsts = map (Param . snd) instList
+        let argBlocks  = concatMap fst instList
+        returnVal <- getTempVar $ exprToDNA exprType
+        let returnOp = Variable False returnVal
+        let newBlock = (argBlocks
+                     ++ paramInsts
+                     ++ [Call name returnOp], returnOp)
+        mapM_ (tryFreeOperand . snd) instList
+        return newBlock
+    generateIrExprHelper exprType node@(ArrayIndexNode arr idx) = do
+        (arrBlock, resultOp) <- generateIrExpr arr
+        (idxBlock, resultOp2) <- generateIrExpr idx
+        ptr <- getTempVar (Int64 1)
+        let ptrDerefType = exprToDNA exprType
+            ptrDeref = MemoryRef False ptr 0 ptrDerefType
+            ptrRaw = Variable False ptr
+        let newBlock = (arrBlock
+                     ++ idxBlock
+                     ++ [Add ptrRaw resultOp resultOp2], ptrDeref)
+        tryFreeOperand resultOp
+        tryFreeOperand resultOp2
+        return newBlock
+    generateIrExprHelper exprType node@(ParenthesisNode sub) = generateIrExpr sub
+    generateIrExprHelper exprType node@(AssignmentNode op lhs rhs) = do
+        (rightBlock, resultOp) <- generateIrExpr rhs
+        (leftBlock, resultOp2) <- generateIrExpr lhs
+        let assnInsts = case op of
+                NoOp -> [Mov resultOp resultOp2]
+                PlusEq -> [Add resultOp resultOp resultOp2]
+                MinusEq -> [Sub resultOp resultOp resultOp2]
+                MulEq -> [Mul resultOp resultOp resultOp2]
+                DivEq -> [Div resultOp resultOp resultOp2]
+                ModEq -> [Mod resultOp resultOp resultOp2]
+        let newBlock = (rightBlock
+                     ++ leftBlock
+                     ++ assnInsts, resultOp)
+        tryFreeOperand resultOp2
+        return newBlock
+    generateIrExprHelper exprType node@(CastNode toType expr) = do
+        let castType = exprToDNA toType
+        (exprBlock, resultOp) <- generateIrExpr expr
+        let resultOpType = getOperandType resultOp
+        outVar <- getTempVar castType
+        let outOperand = Variable False outVar
+        let castInst = if | resultOpType == Float 1 && castType /= Float 1 -> [FloatToInt resultOp outOperand]
+                          | resultOpType /= Float 1 && castType == Float 1 -> [IntToFloat resultOp outOperand]
+                          | resultOpType /= Float 1 && castType /= Float 1 -> [Mov outOperand resultOp]
+        let newBlock = (exprBlock
+                     ++ castInst, outOperand)
+        tryFreeOperand resultOp
+        return newBlock
+    generateIrExprHelper exprType node@(StructMemberNode id) = do
+        let dnaType = getDNAType exprType
+        retVar <- getTempVar dnaType
+        let retOp = Variable False retVar
+        return ([Mov retOp (StructMemberFixup id dnaType)], retOp)
+    generateIrExprHelper exprType node@(MemberAccessNode isPtr lhs rhs) = do
+        (lhsBlock, structOp) <- generateIrExpr lhs
+        (rhsBlock, valOp) <- generateIrExpr rhs
+
+        let fixedRhs = foldr (curry (first fixupOperand >>> uncurry (:))) [] rhsBlock
+        return ([], None)
+      where
+        fixupOperand :: DNAInstruction -> DNAInstruction
+        -- fixupOperand (Mov op1 (StructMemberFixup name memType)) =
+            -- Mov op1 ()
+        fixupOperand op = op

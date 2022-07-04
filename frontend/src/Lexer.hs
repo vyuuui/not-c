@@ -34,9 +34,6 @@ isNumber h = C.isDigit h || h == '.'
 isPunctuationChar :: Char -> Bool
 isPunctuationChar h = S.member [h] punctuation
 
-dropAndCount :: (a -> Bool) -> [a] -> ([a], Int)
-dropAndCount fn = span fn >>> first (arr length) >>> swap
-
 lexStringSingle :: TypeEnv -> String -> LexerResult
 lexStringSingle env str = lexStringSingleHelper env str 0
   where
@@ -52,6 +49,8 @@ lexStringSingle env str = lexStringSingleHelper env str 0
         findCommentEnd (h1:h2:t) numParsed
             | h1 == '*' && h2 == '/' = (t, numParsed + 2)
             | otherwise              = findCommentEnd (h2:t) $ numParsed + 1
+        findCommentEnd [h] numParsed = ("", numParsed)
+        findCommentEnd [] numParsed = ("", numParsed)
     lexStringNoComment :: TypeEnv -> String -> Int -> LexerResult
     lexStringNoComment env str2@(h:t) numParsed
         | isOperatorChar h      = lexOperator str2 numParsed
@@ -104,3 +103,4 @@ lexStringSingle env str = lexStringSingleHelper env str 0
               where
                 newCur = cur ++ [head rest]
             (end, longestMatch, rest) = until checkStop stepLex ("", "", str)
+    lexStringNoComment env [] numParsed = (Eof, numParsed, [])
