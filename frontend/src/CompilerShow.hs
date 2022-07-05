@@ -2,9 +2,6 @@ module CompilerShow
 ( showExprTree
 , showSyntaxTree
 , showDt
-, FunctionDefinition(..)
-, StructDefinition(..)
-, Token(..)
 ) where
 
 import CompilerShared
