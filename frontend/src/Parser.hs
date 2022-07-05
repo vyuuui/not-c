@@ -15,6 +15,10 @@ import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Data.Set as S
 
+-- Raise a failure from the current node's start lex position to the last lexed position
+raiseFailureHere :: String -> ParseAction a
+raiseFailureHere why = join $ raiseFailure why <$> (currentNodeLexStart <$> get) <*> getPrevLexPosition
+
 getTypeEnv :: ParseAction TypeEnv
 getTypeEnv = typeEnv <$> get
 getLexerState :: ParseAction LexerState
@@ -22,33 +26,26 @@ getLexerState = lexerState <$> get
 getSymbolMap :: ParseAction SymbolMap
 getSymbolMap = symbolMap <$> get
 
-pushSymbolEnv :: ParseAction ()
+pushSymbolEnv, popSymbolEnv :: ParseAction ()
 pushSymbolEnv = do
     ParseState lexer typeEnv funcs structs syms lp <- get
     put $ ParseState lexer typeEnv funcs structs (M.empty:syms) lp
-
-popSymbolEnv :: ParseAction ()
 popSymbolEnv = do
     ParseState lexer typeEnv funcs structs syms lp <- get
     put $ ParseState lexer typeEnv funcs structs (tail syms) lp
 
-getLexPosition :: ParseAction Int
+getLexPosition, getPrevLexPosition :: ParseAction Int
 getLexPosition = do
-    (t, rest, (clt, plt)) <- lexerState <$> get
+    (t, rest, (clt, plt)) <- getLexerState
     return clt
-
-getPrevLexPosition :: ParseAction Int
 getPrevLexPosition = do
-    (t, rest, (clt, plt)) <- lexerState <$> get
+    (t, rest, (clt, plt)) <- getLexerState
     return plt
 
 setCurrentLexStart :: Int -> ParseAction ()
 setCurrentLexStart pos = do
     ParseState lexer typeEnv funcs structs syms _ <- get
     put $ ParseState lexer typeEnv funcs structs syms pos
-
-raiseFailureHere :: String -> ParseAction a
-raiseFailureHere why = join $ raiseFailure why <$> (currentNodeLexStart <$> get) <*> getPrevLexPosition
 
 insertSymbol :: String -> SymbolType -> ParseAction ()
 insertSymbol symName sym = do
@@ -76,14 +73,14 @@ eatToken = void scanToken
 
 peekToken :: ParseAction Token
 peekToken = do
-    (cacheTok, _, _) <- lexerState <$> get
+    (cacheTok, _, _) <- getLexerState
     if null cacheTok
     then lexNewToken
     else return $ fst (head cacheTok)
 
 peekTwoToken :: ParseAction (Token, Token)
 peekTwoToken = do
-    (cacheTok, _, _) <- lexerState <$> get
+    (cacheTok, _, _) <- getLexerState
     case cacheTok of
         tok1:tok2:restTok -> return (fst tok1, fst tok2)
         [tok1]            -> do
@@ -96,24 +93,26 @@ peekTwoToken = do
 
 -- Helper to unwrap the String part of certain tokens
 -- error should never be hit, as below helpers should avoid invalid calls
-extractInner :: Token -> String
-extractInner (Identifier s)  = s
-extractInner (Operator s)    = s
-extractInner (Control s)     = s
-extractInner (Punctuation s) = s
-extractInner _               = error "Invalid call"
 
 -- Generic helpers to validate a token given a predicate (and extract)
 extractStrIfValid :: (Token -> Bool) -> String -> Token -> ParseAction String
 extractStrIfValid check tokenClass token =
     if check token
       then return (extractInner token)
-      else raiseFailureHere $ "Tried to extract " ++ tokenClass ++ " token, but got " ++ show token
+      else raiseFailureHere $ "Tried to extract " ++ tokenClass ++ ", but got " ++ show token
+  where
+    extractInner :: Token -> String
+    extractInner (Identifier s)  = s
+    extractInner (Operator s)    = s
+    extractInner (Control s)     = s
+    extractInner (Punctuation s) = s
+    extractInner _               = ""
+
 checkTokenPredicate :: (Token -> Bool) -> String -> Token -> ParseAction ()
 checkTokenPredicate check expected token =
     unless
       (check token)
-      (raiseFailureHere $ "Token validation failed, expected \"" ++ expected ++ "\" but got " ++ show token)
+      (raiseFailureHere $ "Expected \"" ++ expected ++ "\" but got " ++ show token)
 
 -- Helpers to validate several tokens, raises error if validation fails
 extractIdentifierIfValid :: Token -> ParseAction String
@@ -122,7 +121,7 @@ extractOperatorIfValid :: Token -> ParseAction String
 extractOperatorIfValid = extractStrIfValid isOperator "operator"
 extractConstantIfValid :: Token -> ParseAction ConstantType
 extractConstantIfValid (Constant val) = return val
-extractConstantIfValid _              = raiseFailureHere "Expected constant token"
+extractConstantIfValid val              = raiseFailureHere $ "Expected constant but got " ++ show val
 validatePunctuation :: String -> Token -> ParseAction ()
 validatePunctuation val = checkTokenPredicate (punctuationMatches val) val
 validateControl :: String -> Token -> ParseAction ()
@@ -149,16 +148,12 @@ eatKeyword :: String -> ParseAction ()
 eatKeyword val = scanToken >>= validateKeyword val
 
 
-shouldContinueParse :: ParseAction Bool
-shouldContinueParse = do
-    headToken <- peekToken
-    return $ headToken /= Eof
 
 parseProg :: String -> Either FailureInfo Program
 parseProg progStr =
     fmap (\finalState -> (funcList finalState, structList finalState)) (execStateT whatToExecute (initialState progStr))
   where
-    whatToExecute = whileM_ shouldContinueParse parseTopLevel
+    whatToExecute = whileM_ (not . isEof <$> peekToken) parseTopLevel
 
 parseTopLevel :: ParseAction ()
 parseTopLevel = do
@@ -166,7 +161,7 @@ parseTopLevel = do
     case token of 
         Keyword "struct" -> parseAndInsertStruct
         Identifier _ -> parseAndInsertFunction
-        _ -> raiseFailureHere "Unexpected top level token"
+        _ -> raiseFailureHere $ "Unexpected top level token " ++ show token
   where
     parseAndInsertFunction :: ParseAction ()
     parseAndInsertFunction = do
@@ -198,11 +193,6 @@ parseStruct = do
         eatPunctuation ";"
         return ((memberTypeName, arrayList ++ memberPtrList), id)
 
-seqPair :: Monad m => (m a, m b) -> m (a, b)
-seqPair (mFirst, mSecond) = (,) <$> mFirst <*> mSecond
-seqTrip :: Monad m => (m a, m b, m c) -> m (a, b, c)
-seqTrip (mFirst, mSecond, mThird) = (,,) <$> mFirst <*> mSecond <*> mThird
-
 -- Return a parsed function as a SyntaxNode
 parseFunction :: ParseAction FunctionDefinition 
 parseFunction = do
@@ -215,11 +205,11 @@ parseFunction = do
     eatPunctuation ")"
     blockNode <- doAnnotate parseBlock
     popSymbolEnv
-    let fAnnot = FunctionAnnotation {
-            returnTypeLoc = SourceLoc typeBegin idBegin,
-            funcNameLoc = SourceLoc idBegin idEnd,
-            paramsLoc = paramLocs
-        }
+    let fAnnot = FunctionAnnotation
+         { returnTypeLoc = SourceLoc typeBegin idBegin
+         , funcNameLoc = SourceLoc idBegin idEnd
+         , paramsLoc = paramLocs
+         }
     return $ FunctionDefinition typeName id paramList blockNode fAnnot
 
 
@@ -228,7 +218,7 @@ parseParamList = do
     typeToken <- peekToken
     syms <- getSymbolMap
     if isTypeName syms typeToken
-    then doActualParseParamList
+      then doActualParseParamList
       else return ([], [])
   where
     -- Parses the full param list, given there is at least one parameter
@@ -239,6 +229,7 @@ parseParamList = do
         id <- scanIdentifier
         paramEnd <- getLexPosition
         let loc = SourceLoc paramBeg paramEnd
+        -- Prepend the first parameter (type, id, loc) onto the remaining parameters
         unzip . (((typeName, id), loc):) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaParam
       where
         -- Parses a single ", typename identifier"
@@ -270,27 +261,18 @@ isTypeName :: SymbolMap -> Token -> Bool
 isTypeName smap (Identifier id) = getIdentifierType id smap == TypeSym
 isTypeName _ _                  = False
 -- For use to determine statement option, based on the START list for each
-isBlock :: Token -> Bool
+isBlock, isExpression, isLvalue, isConditional, isWhileLoop, isForLoop, isReturn, isEmpty, isContinue, isBreak :: Token -> Bool
 isBlock = punctuationMatches "{"
-isExpression :: Token -> Bool
 isExpression tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(",
                                 operatorMatches "!", operatorMatches "&", operatorMatches "*",
                                 operatorMatches "-"]
-isLvalue :: Token -> Bool
 isLvalue tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(", punctuationMatches "*" ]
-isConditional :: Token -> Bool
 isConditional = controlMatches "if"
-isWhileLoop :: Token -> Bool
 isWhileLoop = controlMatches "while"
-isForLoop :: Token -> Bool
 isForLoop = controlMatches "for"
-isReturn :: Token -> Bool
 isReturn = controlMatches "return"
-isEmpty :: Token -> Bool
 isEmpty = punctuationMatches ";"
-isContinue :: Token -> Bool 
 isContinue = controlMatches "continue"
-isBreak :: Token -> Bool 
 isBreak = controlMatches "break"
 
 parseStatement :: ParseAction (SyntaxNodeF SyntaxNode)
@@ -299,8 +281,8 @@ parseStatement = do
     smap <- getSymbolMap
     env <- getTypeEnv
     if isTypeName smap tok
-        then parseDeclaration >>= \x -> eatPunctuation ";" >> return x
-        else parseStatementLookahead env tok
+      then parseDeclaration >>= \x -> eatPunctuation ";" >> return x
+      else parseStatementLookahead env tok
   where
     parseStatementLookahead :: TypeEnv -> Token -> ParseAction (SyntaxNodeF SyntaxNode)
     parseStatementLookahead env lookahead
@@ -327,7 +309,7 @@ parseStatement = do
             eatControl "break"
             eatPunctuation ";"
             return BreakNode
-        | otherwise               = raiseFailureHere "Unexpected token when parsing statement"
+        | otherwise               = raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " when parsing statement"
 
 doAnnotate :: ParseAction (SyntaxNodeF SyntaxNode) -> ParseAction SyntaxNode
 doAnnotate action = do

@@ -63,7 +63,7 @@ lexStringSingle env str = lexStringSingleHelper env str 0
                                   in  (classifyLetterToken (h:token) env, totalParsed, rest)
         | C.isSpace h           = uncurry (lexStringSingleHelper env) $ second (+numParsed) (dropAndCount C.isSpace (h:t))
         | h == '"'              = lexStringConstant t numParsed
-        | otherwise             = (Invalid, numParsed, t)
+        | otherwise             = (Invalid [h], numParsed, t)
       where
         lexStringConstant :: String -> Int -> LexerResult
         lexStringConstant str numParsed = tryAppendStr $ until endingQuote buildString ("", numParsed, str)
@@ -79,7 +79,7 @@ lexStringSingle env str = lexStringSingleHelper env str 0
             buildString (lhs, numParsed, [h]) = (lhs ++ [h], numParsed + 1, t)
             buildString (lhs, numParsed, [])  = (lhs, numParsed + 1, "")
             tryAppendStr (buildStr, numParsed, _:t) = (Constant $ StringConstant buildStr, numParsed, t)
-            tryAppendStr (_, numParsed, rest) = (Invalid, numParsed, rest)
+            tryAppendStr (invStr, numParsed, rest) = (Invalid invStr, numParsed, rest)
         classifyNumberToken str 
             | '.' `elem` str = Constant $ FloatConstant (read str :: Float)
             | otherwise      = Constant $ IntConstant (read str :: Int)
@@ -92,7 +92,7 @@ lexStringSingle env str = lexStringSingleHelper env str 0
             | otherwise                = Identifier str
         lexOperator :: String -> Int -> LexerResult
         lexOperator str numParsed
-            | null longestMatch = (Invalid, numParsed, rest)
+            | null longestMatch = trace ("operator is " ++ longestMatch) (Invalid str, numParsed, rest)
             | otherwise         = (Operator longestMatch, numParsed + length longestMatch, drop (length longestMatch) str)
           where
             checkStop (_, _, [])            = True

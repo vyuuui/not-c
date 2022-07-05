@@ -1,9 +1,9 @@
 module CompilerShow
 ( showExprTree
 , showSyntaxTree
+, showDt
 , FunctionDefinition(..)
 , StructDefinition(..)
-, ExprType(..)
 , Token(..)
 ) where
 
@@ -58,7 +58,7 @@ showExprTreeLn expr = case getCompose $ unFix expr of
             strLns = rewriteHead "└─" $ map ("  "++) $ showExprTreeLn str
         in  header ++ (memLns ++ strLns)
     (annot, CastNode tp sub) ->
-        let header = ["Cast (" ++ show (ExprType tp) ++ ") : " ++ show annot]
+        let header = ["Cast (" ++ showDt tp ++ ") : " ++ show annot]
             subLns = rewriteHead "└─" $ map ("  " ++) $ showExprTreeLn sub
         in  header ++ subLns
 
@@ -113,19 +113,22 @@ showSyntaxTree = unlines . showTreeR
             let header = ["Blocks : " ++ show annot]
                 subLns = rewriteHead "└─" $ map ("  "++) $ showTreeR block
             in  header ++ subLns
-        (annot, DeclarationNode dt id) -> ["Declaration " ++ show (ExprType dt) ++ " " ++ show id ++ " : " ++ show annot]
+        (annot, DeclarationNode dt id) -> ["Declaration " ++ showDt dt ++ " " ++ show id ++ " : " ++ show annot]
         (annot, DefinitionNode dt id expr) ->
-            let header = ["Definition " ++ show (ExprType dt) ++ " " ++ show id ++ " : " ++ show annot]
+            let header = ["Definition " ++ showDt dt ++ " " ++ show id ++ " : " ++ show annot]
                 exprLns = rewriteHead "└─" $ map ("  "++) $ showTreeR expr
             in  header ++ exprLns
         (annot, ExprNode e) -> showExprTreeLn e
 
 showDeclList :: String -> DeclList -> String
-showDeclList inter = L.intercalate inter . map (\ (t, n) -> show (ExprType t) ++ (' ':n))
+showDeclList inter = L.intercalate inter . map (\ (t, n) -> showDt t ++ (' ':n))
+
+instance Show ExprInfo where
+    show (ExprInfo tp hd sl) = showDt tp ++ " (" ++ show hd ++ ") @ " ++ show sl
 
 instance Show FunctionDefinition where
     show (FunctionDefinition rt name params root locs) =
-        show (ExprType rt) ++ (' ':name ++ ('(':paramsStr ++ (")\n" ++ showSyntaxTree root)))
+        showDt rt ++ (' ':name ++ ('(':paramsStr ++ (")\n" ++ showSyntaxTree root)))
       where
         paramsStr = showDeclList ", " params
 
@@ -135,9 +138,6 @@ instance Show StructDefinition where
       where
         membersStr = showDeclList ";\n  " members
 
-instance Show ExprType where
-    show (ExprType (tp, pList)) = tp ++ concatMap (\i -> if i == 0 then "*" else "[" ++ show i ++ "]") pList
-
 instance Show Token where
     show (Identifier id) = "id '" ++ id ++ "'"
     show (Constant ct) = "constant '" ++ show ct ++ "'"
@@ -146,4 +146,7 @@ instance Show Token where
     show (Punctuation p) = p
     show (Keyword kw) = kw
     show Eof = "eof"
-    show Invalid = "Invalid token"
+    show (Invalid s) = s
+
+showDt :: DataType -> String
+showDt (dataTypeName, ptrList) = dataTypeName ++ concatMap (\x -> if x > 0 then "[" ++ show x ++ "]" else "*") ptrList
