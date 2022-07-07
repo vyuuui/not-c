@@ -9,6 +9,7 @@ import Parser
 import System.IO
 import Validator
 import Control.Arrow
+import Generator
 
 dropAndCountComment :: String -> Int -> (String, Int)
 dropAndCountComment (h1:h2:t) count
@@ -60,6 +61,18 @@ validateAndPrint file = do
         Left msg      -> printError contents msg  -- putStrLn $ failReason msg
         Right (t, s)  -> mapM_ print t
 
+generateAndPrint :: String -> IO ()
+generateAndPrint file = do
+    contents <- readFile file
+    prog <- case parseProg contents of
+         Right p -> return p
+         Left msg -> do
+             printError contents msg --error ("Bad program nat! msg=" ++ failReason msg)
+             return ([], [])
+    let res = validateProgram prog
+    case res of
+        Left msg      -> printError contents msg  -- putStrLn $ failReason msg
+        Right prog  -> putStr $ concatMap showFunction $ generateProgram prog 
 
 main :: IO ()
 main = return ()

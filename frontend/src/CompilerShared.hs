@@ -317,3 +317,54 @@ popToken :: ParseState -> (Token, ParseState)
 popToken (ParseState (h:t, rest, (curclt, prevclt)) env funcs structs syms lp) =
     (fst h, ParseState (t, rest, (curclt + snd h, curclt)) env funcs structs syms lp)
 popToken (ParseState ([], rest, clt) env funcs structs syms lp) = error "popToken called on empty token list"
+
+data DNAType
+    = Int8  Int
+    | Int16 Int
+    | Int32 Int
+    | Int64 Int
+    | Float Int
+    | InvalidType
+    deriving (Eq, Ord)
+
+data DNAVariable 
+    = Temp String DNAType
+    | Input String DNAType
+    | Local String DNAType
+
+data DNAOperand
+    = Variable Bool DNAVariable
+    | MemoryRef Bool DNAVariable Int DNAType
+    | Immediate Rational DNAType
+    | StructMemberFixup String DNAType
+    | None
+    
+data JmpCondition
+    = Always
+    | Eq 
+    | Ne 
+    | Gt 
+    | Lt 
+    | Ge 
+    | Le
+
+type DNABlock = [DNAInstruction]
+type DNAFunctionDefinition = (String, [DNAVariable], DNABlock)
+
+data DNAInstruction
+    = Mov DNAOperand DNAOperand
+    | Add DNAOperand DNAOperand DNAOperand
+    | Sub DNAOperand DNAOperand DNAOperand
+    | Mul DNAOperand DNAOperand DNAOperand
+    | Div DNAOperand DNAOperand DNAOperand
+    | Mod DNAOperand DNAOperand DNAOperand
+    | Cmp DNAOperand DNAOperand
+    | Jmp JmpCondition String
+    | Param DNAOperand
+    | Call String DNAOperand
+    | ReturnVal DNAOperand
+    | ReturnVoid
+    | ArrayCopy DNAOperand DNAOperand Int
+    | IntToFloat DNAOperand DNAOperand
+    | FloatToInt DNAOperand DNAOperand
+    | Label String

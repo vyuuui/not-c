@@ -24,7 +24,7 @@ executable definitely-not-c
     ghc-options:      -dynamic
 
     -- Modules included in this executable, other than Main.
-    other-modules: Lexer, CompilerShared, Parser, CompilerShow, Validator
+    other-modules: Lexer, CompilerShared, Parser, CompilerShow, Validator, Generator
 
     -- LANGUAGE extensions used by modules in this package.
     extensions: MultiWayIf

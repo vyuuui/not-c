@@ -2,6 +2,7 @@ module CompilerShow
 ( showExprTree
 , showSyntaxTree
 , showDt
+, showFunction
 ) where
 
 import CompilerShared
@@ -147,3 +148,73 @@ instance Show Token where
 
 showDt :: DataType -> String
 showDt (dataTypeName, ptrList) = dataTypeName ++ concatMap (\x -> if x > 0 then "[" ++ show x ++ "]" else "*") ptrList
+
+instance Show DNAType where
+    show (Int8 c) = if c == 1 then "int8" else "int8 " ++ show c
+    show (Int16 c) = if c == 1 then "int16" else "int16 " ++ show c
+    show (Int32 c) = if c == 1 then "int32" else "int32 " ++ show c
+    show (Int64 c) = if c == 1 then "int64" else "int64 " ++ show c
+    show (Float c) = if c == 1 then "float" else "float " ++ show c
+    show _         = "(Invalid Type)"
+    
+
+instance Show DNAOperand where
+    show (Variable isRef var) = varWithRef
+      where
+        varWithRef
+            | isRef = '&':show var
+            | otherwise = show var
+    show (MemoryRef isRef var off tp)
+        | off > 0   = "[" ++ varWithRef ++ " + " ++ show off ++ "]::" ++ show tp
+        | otherwise = "[" ++ varWithRef ++ "]::" ++ show tp
+      where
+        varWithRef
+            | isRef = '&':show var
+            | otherwise = show var
+    show (Immediate val tp) = show (round val) ++ "::" ++ show tp
+    show _ = "(Invalid Operand)"
+
+instance Show JmpCondition where
+    show Always = "mp"
+    show Eq = "eq"
+    show Ne = "ne"
+    show Gt = "gt"
+    show Lt = "lt"
+    show Ge = "ge"
+    show Le = "le"
+
+instance Show DNAVariable where
+    show (Temp name tp)  = name
+    show (Input name tp) = name
+    show (Local name tp) = name
+
+showVarHdr :: DNAVariable -> [Char]
+showVarHdr (Temp name tp)  = "temp " ++ name ++ ' ':show tp
+showVarHdr (Input name tp) = "input " ++ name ++ ' ':show tp
+showVarHdr (Local name tp) = "local " ++ name ++ ' ':show tp
+
+instance Show DNAInstruction where
+    show (Mov dst src) = "mov" ++ (' ':show dst) ++ (' ':show src)
+    show (Add dst src1 src2) = "add" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+    show (Sub dst src1 src2) = "sub" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+    show (Mul dst src1 src2) = "mul" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+    show (Div dst src1 src2) = "div" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+    show (Mod dst src1 src2) = "mov" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+    show (Cmp lhs rhs) = "cmp" ++ (' ':show lhs) ++ (' ':show rhs)
+    show (Jmp cond lbl) = "j" ++ show cond ++ (' ':lbl)
+    show (Param op) = "param" ++ (' ':show op)
+    show (Call name output) = "call" ++ (' ':name) ++ (' ':show output)
+    show (ReturnVal value) = "return" ++ (' ':show value)
+    show ReturnVoid = "return"
+    show ArrayCopy {} = error "implement me later"
+    show (IntToFloat op1 op2) = "inttofloat " ++ (' ':show op1) ++ (' ':show op2)
+    show (FloatToInt op1 op2) = "floattoint " ++ (' ':show op1) ++ (' ':show op2)
+    show (Label lbl) = ".label " ++ (' ':lbl)
+
+showFunction :: DNAFunctionDefinition -> String
+showFunction (name, vars, body) =
+    let header = [".sub " ++ name]
+        var = map showVarHdr vars
+        bod = map show body
+        things = [header, var, [".endframe", ".label " ++ name], bod, [".endsub"]]
+    in unlines $ concat things
