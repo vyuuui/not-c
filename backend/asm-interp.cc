@@ -35,6 +35,12 @@ void trim_whitespace(std::string& str) {
     }
 }
 
+void trim_head(std::string& str) {
+    size_t head = 0;
+    for (; head < str.size() && isspace(str[head]); head++) {}
+    str = str.substr(head);
+}
+
 void getline_trim(std::ifstream& stream, std::string& out) {
     std::getline(stream, out);
     trim_whitespace(out);
@@ -43,6 +49,9 @@ void getline_trim(std::ifstream& stream, std::string& out) {
 class ProgramStack {
 public:
     void* get_stack_var(int64_t byte_off) {
+        if (byte_off < 0 || byte_off >= frame_data.size()) {
+            throw std::runtime_error("Out-of-bounds stack reference");
+        }
         return static_cast<void*>(frame_data.data() + byte_off);
     }
     void push_stack_var(void* val, size_t size) {
@@ -51,6 +60,9 @@ public:
         set_stack_var(offset, val, size);
     }
     void set_stack_var(int64_t byte_off, void* val, size_t size) {
+        if (byte_off < 0 || byte_off >= frame_data.size()) {
+            throw std::runtime_error("Out-of-bounds stack reference");
+        }
         std::memcpy(frame_data.data() + byte_off, val, size);
     }
     size_t get_stack_size() {
@@ -147,6 +159,11 @@ struct SubroutineRetInfo {
     SubroutineInfo* return_sub;
 };
 
+struct GlobalArray {
+    BaseType elt_type;
+    std::vector<uint8_t> raw_data;
+};
+
 struct CpuContext {
     uint64_t program_counter;
    
@@ -162,6 +179,7 @@ struct CpuContext {
     std::stack<SubroutineRetInfo> call_stack;
     SubroutineInfo* current_sub;
     uint64_t current_sub_base;
+    std::unordered_map<std::string, GlobalArray> global_array_map;
 } ctx;
 
 class Operand {
@@ -186,6 +204,9 @@ public:
 
     virtual void set_generic(void* value, size_t size) = 0;
     virtual void* get_generic() = 0;
+    virtual void* get_absolute_ptr() {
+        throw std::runtime_error("get_absolute_ptr not implemented for this operand type");
+    }
     virtual ~Operand() {}
 
 private:
@@ -206,6 +227,15 @@ public:
         const uint64_t frame_base = ctx.current_sub_base;
         return ctx.stack.get_stack_var(frame_base + var_stack_offset);
     }
+
+    void* get_absolute_ptr() override {
+        if (get_type() != BaseType::Int64) {
+            throw std::runtime_error("get_absolute_ptr called on non-pointer variable");
+        }
+        int64_t stack_offset = get<int64_t>();
+        return ctx.stack.get_stack_var(stack_offset);
+    }
+
     virtual ~VarOperand() {}
 
 private:
@@ -214,8 +244,8 @@ private:
 
 class VarRefOperand : public Operand {
 public:
-    VarRefOperand(BaseType type, uint64_t var_stack_offset)
-        : Operand(type), var_stack_offset(var_stack_offset) {}
+    VarRefOperand(uint64_t var_stack_offset)
+        : Operand(BaseType::Int64), var_stack_offset(var_stack_offset) {}
 
     void set_generic(void* value, size_t size) override {
         throw std::runtime_error("Can't set a variable reference");
@@ -224,6 +254,11 @@ public:
     void* get_generic() override {
         var_net_offset = ctx.current_sub_base + var_stack_offset;
         return &var_net_offset;
+    }
+
+    void* get_absolute_ptr() override {
+        uint64_t offset = ctx.current_sub_base + var_stack_offset;
+        return ctx.stack.get_stack_var(offset);
     }
 
     virtual ~VarRefOperand() {}
@@ -260,6 +295,14 @@ public:
                 ctx.stack.get_stack_var(frame_base + var_stack_offset));
             return ctx.stack.get_stack_var(stack_pointer + offset);
         }
+    }
+
+    void* get_absolute_ptr() override {
+        if (get_type() != BaseType::Int64) {
+            throw std::runtime_error("get_absolute_ptr called on non-pointer variable");
+        }
+        int64_t stack_offset = get<int64_t>();
+        return ctx.stack.get_stack_var(stack_offset);
     }
 
     virtual ~MemoryOperand() {}
@@ -310,6 +353,32 @@ public:
 
 private:
     uint8_t value[kPrimitiveMaxSize];
+};
+
+class GlobalOperand : public Operand {
+public:
+    GlobalOperand(std::string global_name) : Operand(BaseType::Int64), global_name(global_name) {}
+
+    void set_generic(void* value, size_t size) override {
+        throw std::runtime_error("Attempted set on GlobalOperand");
+    }
+
+    void* get_generic() override {
+        throw std::runtime_error("GlobalOperand does not support basic get, should only be used in arraycopy");
+    }
+
+    void* get_absolute_ptr() override {
+        auto it = ctx.global_array_map.find(global_name);
+        if (it == ctx.global_array_map.end()) {
+            throw std::runtime_error("Referenced non-existent global " + global_name);
+        }
+        return static_cast<void*>(it->second.raw_data.data());
+    }
+
+    virtual ~GlobalOperand() {}
+
+private:
+    std::string global_name;
 };
 
 class Instruction {
@@ -810,10 +879,10 @@ public:
             dest->get_type() != BaseType::Int64) {
             throw std::runtime_error("arraycopy called with non-pointer operands");
         }
-        void* read_base = ctx.stack.get_stack_var(src->get<int64_t>());
+        uint8_t* read_base = reinterpret_cast<uint8_t*>(src->get_absolute_ptr());
         uint64_t write_addr = dest->get<int64_t>();
         for (size_t i = 0; i < copy_count; i++) {
-            ctx.stack.set_stack_var(write_addr + i, read_base, 1);
+            ctx.stack.set_stack_var(write_addr + i, read_base + i, 1);
         }
     }
 
@@ -958,10 +1027,22 @@ Operand* parse_srcop(std::string& op, SubroutineInfo const& current_sub) {
     if (ret != nullptr) {
         return ret;
     }
-    std::regex imm_type_re("(.*)::(int8|int16|int32|int64|float|cstring)\\s*(.*)$");
+    std::regex imm_type_re("(.*?)::(int8|int16|int32|int64|float|cstring)\\s*(.*)$");
     std::regex varref_ptr_re("&([a-zA-Z_][a-zA-Z_0-9]*)\\s*(.*)$");
+    std::regex glob_type_re("%([a-zA-Z_][a-zA-Z_0-9]*)\\s*(.*)$");
     std::smatch matches;
-    if (std::regex_match(op, matches, imm_type_re)) {
+    if (std::regex_match(op, matches, varref_ptr_re)) {
+        std::string varname = matches[1];
+        auto it = current_sub.variable_map.find(varname);
+        if (it == current_sub.variable_map.end()) {
+            return nullptr;
+        }
+        ret = new VarRefOperand(it->second.stack_offset);
+        op = matches[2];
+    } else if (std::regex_match(op, matches, glob_type_re)) {
+        ret = new GlobalOperand(matches[1]);
+        op = matches[2];
+    } else if (std::regex_match(op, matches, imm_type_re)) {
         std::string imm_type = matches[2];
         std::string constant_str = matches[1];
         op = matches[3]; 
@@ -990,16 +1071,8 @@ Operand* parse_srcop(std::string& op, SubroutineInfo const& current_sub) {
             }
             ret = new ImmediateOperand(base_type, &val);
         } else {
-            // TODO: GLOBALS FUCKER
+            throw std::runtime_error("Failed to parse immediate");
         }
-    } else if (std::regex_match(op, matches, varref_ptr_re)) {
-        std::string varname = matches[1];
-        auto it = current_sub.variable_map.find(varname);
-        if (it == current_sub.variable_map.end()) {
-            return nullptr;
-        }
-        ret = new VarRefOperand(it->second.type_info, it->second.stack_offset);
-        op = matches[2];
     } else {
         return nullptr;
     }
@@ -1144,9 +1217,14 @@ Instruction* parse_return(std::string const& args, SubroutineInfo const& current
 
 Instruction* parse_arraycopy(std::string const& args, SubroutineInfo const& current_sub) {
     std::string op = args;
-    Operand* des = parse_destop(op, current_sub);
+    Operand* des = parse_srcop(op, current_sub);
     Operand* srcop = parse_srcop(op, current_sub);
-    int size = stoi(args);
+    std::regex int_re("\\s*(\\d+)\\s*$");
+    std::smatch matches;
+    if (!std::regex_match(op, matches, int_re)) {
+        return nullptr;
+    }
+    int size = stoi(matches[1]);
     
     if (des == nullptr || srcop == nullptr) {
         return nullptr;
@@ -1294,28 +1372,14 @@ parse_frame_description(std::ifstream& file) {
     return map;
 }
 
-std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<Instruction*>& program) {
-    std::string line = "";
-    while (line.empty()) {
-        if (file.eof()) {
-            return std::nullopt;
-        }
-        getline_trim(file, line);
-    }
-
-    std::regex re("^\\s*.sub\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s*$");
-    std::smatch matches;
-    if (!std::regex_match(line, matches, re)) {
-        throw std::runtime_error("Unexpected line \"" + line + "\" when \".sub\" was expected");
-    }
-
+void parse_subroutine(std::ifstream& file, std::string subroutine_name, std::vector<Instruction*>& program) {
     SubroutineInfo si;
-    si.subroutine_name = matches[1];
+    si.subroutine_name = subroutine_name;
     si.frame_size = 0;
     si.params_size = 0;
     auto frame_vars = parse_frame_description(file);
     if (!frame_vars) {
-        return std::nullopt;
+        throw std::runtime_error("Failed to parse frame description of subroutine " + subroutine_name);
     }
     uint64_t cur_stackoff = 0;
     // compute frame size, params size, and parameter stack offsets
@@ -1339,14 +1403,14 @@ std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<
     si.variable_map = std::move(*frame_vars);
 
     // parse instructions
+    std::string line;
     for (getline_trim(file, line);
-        line.find(".endsub") == std::string::npos;
-        getline_trim(file, line)) {
+         line.find(".endsub") == std::string::npos;
+         getline_trim(file, line)) {
         if (file.eof()) {
             throw std::runtime_error("Unexpected EOF in parse_subroutine");
         }
 
-        trim_whitespace(line);
         if (line.empty()) {
             continue;
         }
@@ -1363,7 +1427,117 @@ std::optional<SubroutineInfo> parse_subroutine(std::ifstream& file, std::vector<
         }
     }
 
-    return si;
+    ctx.subroutine_map[subroutine_name] = si;
+}
+
+std::optional<int64_t> parse_constant(std::string& constant) {
+    trim_head(constant);
+    if (constant.empty()) {
+        return std::nullopt;
+    }
+    if (constant[0] == '\'') {
+        if (constant.size() <= 1) {
+            throw std::runtime_error("Failed to parse character constant: " + constant);
+        }
+        if (constant[1] == '\\') {
+            if (constant.size() <= 3) {
+                throw std::runtime_error("Failed to parse escape sequence: " + constant);
+            }
+            char ret_char = 0;
+            switch (constant[2]) {
+                case 'n':
+                    ret_char = static_cast<int64_t>('\n');
+                    break;
+                case 't':
+                    ret_char = static_cast<int64_t>('\t');
+                    break;
+                case '\\':
+                    ret_char = static_cast<int64_t>('\\');
+                    break;
+                default:
+                    throw std::runtime_error("Invalid escape sequence: " + constant.substr(0, 4));
+            }
+            if (constant[3] != '\'') {
+                throw std::runtime_error("Failed to parse escape sequence: " + constant);
+            }
+            constant = constant.substr(4);
+            return ret_char;
+        }
+        if (constant.length() <= 2) {
+            throw std::runtime_error("Failed to parse character constant: " + constant);
+        }
+        if (constant[2] != '\'') {
+            throw std::runtime_error("Failed to parse character constant: " + constant.substr(0, 3));
+        }
+        const char ret = constant[1];
+        constant = constant.substr(3);
+        return static_cast<int64_t>(ret);
+    }
+    std::regex flt_re("^(\\d+\\.\\d+)\\s*(.*)");
+    std::regex int_re("^(\\d+)\\s*(.*)");
+    std::smatch matches;
+    if (std::regex_match(constant, matches, flt_re)) {
+        const double val = std::stod(matches[1]);
+        constant = matches[2];
+        static_assert(sizeof(double) == sizeof(uint64_t));
+        return *reinterpret_cast<int64_t const*>(&val);
+    }
+    if (std::regex_match(constant, matches, int_re)) {
+        std::string int_str = matches[1];
+        constant = matches[2];
+        return strtoll(int_str.c_str(), nullptr, 10);
+    }
+    return std::nullopt;
+}
+
+void parse_global(std::ifstream& file, std::string const& arr_name, std::string const& type_str) {
+    constexpr auto eat_comma = [](std::string& line) {
+        trim_head(line);
+        if (line.empty()) {
+            return false;
+        }
+        if (line[0] != ',') {
+            return false;
+        }
+        line = line.substr(1);
+        return true;
+    };
+    BaseType arr_type = type_from_string(type_str);
+    size_t elt_size = base_type_size(arr_type);
+
+    std::string line;
+    std::vector<uint8_t> raw_arr;
+    bool needs_eat_comma = false;
+    for (getline_trim(file, line); line != ".endarray"; getline_trim(file, line)) {
+        if (file.eof()) {
+            throw std::runtime_error("Unexpected EOF in parse_globals");
+        }
+        if (line.empty()) {
+            continue;
+        }
+
+        if (needs_eat_comma) {
+            if (!eat_comma(line)) {
+                throw std::runtime_error("Failed to parse expected ','");
+            }
+        }
+        needs_eat_comma = false;
+        for (auto opt = parse_constant(line); opt; opt = parse_constant(line)) {
+            uint64_t insert_val = *opt;
+            uint8_t* insert_beg = reinterpret_cast<uint8_t*>(&insert_val);
+            uint8_t* insert_end = insert_beg + elt_size;
+            raw_arr.insert(raw_arr.end(), insert_beg, insert_end);
+            if (!eat_comma(line)) {
+                if (line.empty()) {
+                    needs_eat_comma = true;
+                } else {
+                    throw std::runtime_error("Failed to parse expected ','");
+                }
+                break;
+            }
+        }
+    }
+    ctx.global_array_map[arr_name] = GlobalArray { .elt_type = arr_type, .raw_data = std::move(raw_arr) };
 }
 
 int main(int argc, char** argv) {
@@ -1382,10 +1556,21 @@ int main(int argc, char** argv) {
     std::vector<Instruction*> program;
 
     try {
-        auto subroutine = parse_subroutine(asm_file, program);
-        while (subroutine) {
-            ctx.subroutine_map[subroutine->subroutine_name] = subroutine.value();
-            subroutine = parse_subroutine(asm_file, program);
+        std::regex sub_re("^\\.sub\\s+([a-zA-Z_][a-zA-Z_0-9]*)$");
+        std::regex array_re("^\\.array\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s+(int8|int16|int32|int64|float)$");
+        while (!asm_file.eof()) {
+            getline_trim(asm_file, line);
+            if (line.empty()) {
+                continue;
+            }
+            std::smatch matches;
+            if (std::regex_match(line, matches, sub_re)) {
+                parse_subroutine(asm_file, matches[1], program);
+            } else if (std::regex_match(line, matches, array_re)) {
+                parse_global(asm_file, matches[1], matches[2]);
+            } else {
+                throw std::runtime_error("Unexpected assembler line/directive");
+            }
         }
         if (ctx.subroutine_map.find("main") == ctx.subroutine_map.end()) {
             throw std::runtime_error("Failed to find entrypoint, should be main");

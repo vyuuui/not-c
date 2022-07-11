@@ -6,7 +6,7 @@ local t2 int64
 .label main
 
 mov t1 0::int64
-mov t2 &t0
+mov t2 &t1
 .label main_l0
 mul [t2]::int8 t1 3::int8
 add t1 t1 1::int64
