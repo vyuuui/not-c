@@ -1,27 +1,35 @@
+.sub proof_my_compiler_works
+in _fac int64
+local _i int64
+local _out int64
+temp t0 int8
+temp t1 int32
+.endframe
+.label proof_my_compiler_works
+print _fac
+mov _out 1::int64
+mov _i 1::int64
+.label l2
+mov t0 0::int8
+cmp _i _fac
+jgt l0
+mov t0 1::int8
+.label l0
+cmp t0 0::int8
+jeq l1
+mul _out _out _i
+.label l3
+add _i _i 1::int64
+jmp l2
+.label l1
+mov t1 _out
+return t1
+.endsub
 .sub main
-local t0 int8 10
-local t1 int64
-local t2 int64
+temp t0 int32
 .endframe
 .label main
-
-mov t1 0::int64
-mov t2 &t1
-.label main_l0
-mul [t2]::int8 t1 3::int8
-add t1 t1 1::int64
-add t2 t2 1::int64
-cmp t1 10::int64
-jlt main_l0
-
-mov t1 0::int64
-mov t2 &t0
-.label main_l1
-print [t2]::int8
-add t1 t1 1::int64
-add t2 t2 1::int64
-cmp t1 10::int64
-jlt main_l1
-return [&t0 + 2]::int8
-
+param 5::int64 int64
+call proof_my_compiler_works t0
+return t0
 .endsub

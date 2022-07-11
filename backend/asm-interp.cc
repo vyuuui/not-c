@@ -835,7 +835,7 @@ public:
         // Step forward sub base based on current function size
         ctx.current_sub_base += ctx.current_sub->frame_size;
         ctx.current_sub = called_subroutine;
-        ctx.program_counter = dest->get<uint64_t>();
+        ctx.program_counter = dest->get<uint64_t>() - 1;
     }
 
     virtual ~CallInstruction() {}
@@ -849,6 +849,7 @@ public:
         auto ret_info = ctx.call_stack.top();
         ctx.call_stack.pop();
         uint8_t value[kPrimitiveMaxSize];
+        memset(value, 0, sizeof(value));
         if (operands.size() > 0 && ret_info.return_store != nullptr) {
             auto ret_value = operands[0];
             memcpy(value, ret_value->get_generic(), base_type_size(ret_value->get_type()));
@@ -861,7 +862,7 @@ public:
             auto ret_value = operands[0];
             ret_info.return_store->set_generic(value, base_type_size(ret_value->get_type()));
         }
-        ctx.program_counter = ret_info.return_address;
+        ctx.program_counter = ret_info.return_address - 1;
     }
 
     virtual ~ReturnInstruction() {}
@@ -1202,7 +1203,7 @@ Instruction* parse_param(std::string const& args, SubroutineInfo const& current_
 
 Instruction* parse_return(std::string const& args, SubroutineInfo const& current_sub) {
     std::string op = args;
-    std::regex empty_re("\\s*$");
+    std::regex empty_re("\\$nil\\s*$");
 
     Operand* srcop = parse_srcop(op, current_sub);
     if (srcop == nullptr) {
@@ -1266,7 +1267,7 @@ Instruction* parse_print(std::string const& args, SubroutineInfo const& current_
 
 Instruction* parse_instruction(std::string line, size_t instruction_address, SubroutineInfo const& current_sub) {
     Instruction* instr = nullptr;
-    std::regex optype("^\\s*(mov|add|sub|mul|div|mod|cmp|jmp|je|jne|jgt|jlt|jge|jle|param|label|call|return|arraycopy|inttofloat|floattoint|print)\\s*(.*)$");
+    std::regex optype("^\\s*(mov|add|sub|mul|div|mod|cmp|jmp|jeq|jne|jgt|jlt|jge|jle|param|label|call|return|arraycopy|inttofloat|floattoint|print)\\s+(.*)$");
     std::smatch matches;
     if (!std::regex_match(line, matches, optype)) {
         return nullptr;
@@ -1289,7 +1290,7 @@ Instruction* parse_instruction(std::string line, size_t instruction_address, Sub
         instr = parse_cmp(rest, current_sub);
     } else if (name == "jmp") {
         instr = parse_jmp(rest, JmpCondition::None, current_sub);
-    } else if (name == "je") {
+    } else if (name == "jeq") {
         instr = parse_jmp(rest, JmpCondition::Eq, current_sub);
     } else if (name == "jne") {
         instr = parse_jmp(rest, JmpCondition::NotEq, current_sub);
