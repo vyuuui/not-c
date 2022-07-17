@@ -6,7 +6,6 @@ temp t0 int8
 temp t1 int32
 .endframe
 .label proof_my_compiler_works
-print _fac
 mov _out 1::int64
 mov _i 1::int64
 .label l2
@@ -29,7 +28,7 @@ return t1
 temp t0 int32
 .endframe
 .label main
-param 5::int64 int64
+param 10::int64 int64
 call proof_my_compiler_works t0
 return t0
 .endsub

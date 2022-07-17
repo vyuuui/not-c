@@ -763,7 +763,7 @@ public:
             }
             break;
         case JmpCondition::Gt:
-            if (ctx.compare_equal && ctx.compare_sign == ctx.compare_overflow) {
+            if (!ctx.compare_equal && ctx.compare_sign == ctx.compare_overflow) {
                 ctx.program_counter = dest->get<uint64_t>() - 1;
             }
             break;
