@@ -162,7 +162,7 @@ addVar name var = do
     put $ GeneratorState lblCtr freeVars (M.insert name var envMap) structs depth lbls aCtx
 getDNAType :: StructMap -> DataType -> DNAType
 getDNAType structs (typeName, ptrList)
-    | M.member typeName structs = Int8 (sizeofStruct structs typeName)
+    | null ptrList && M.member typeName structs = Int8 (sizeofStruct structs typeName)
     | otherwise =
         let baseTypeConstructor =
               if null ptrList || last ptrList > 0
@@ -179,6 +179,11 @@ getDNAType structs (typeName, ptrList)
         | typename == "long"  = Int64
         | typename == "float" = Float
         | otherwise           = const InvalidType
+getDNATypeForOperand :: StructMap -> DataType -> DNAType
+getDNATypeForOperand structs dt@(typeName, ptrList)
+    | null ptrList && M.member typeName structs = Int8 1
+    | isArrayType dt = getDNATypeForOperand structs (typeName, dropWhile (>0) ptrList)
+    | otherwise = getDNAType structs dt
 
 getTempVar :: DNAType -> GeneratorAction DNAVariable
 getTempVar typeName = do
@@ -341,26 +346,20 @@ generateIr = generateIrHelper . snd . getCompose . unFix
                 ]
         tryFreeOperand resultOp
         return newBlock
-    generateIrHelper (DeclarationNode datatype id) = do
-        localEnv <- env <$> get
-        structs <- structMap <$> get
-        depth <- blockDepth <$> get
-        idForBlock <- nameDepth id . blockDepth <$> get
-        let dnaType = getDNAType structs datatype
-            var = Local idForBlock dnaType
-        setEnvironment (M.insert idForBlock var localEnv)
+    generateIrHelper (DeclarationNode dataType id) = do
+        addLocal id dataType
         return []
-    generateIrHelper (DefinitionNode datatype id expr) = do
+    generateIrHelper (DefinitionNode dataType id expr) = do
+        addLocal id dataType
         (exprBlock, resultOp) <- generateIrSyntaxExpr expr
         localEnv <- env <$> get
         structs <- structMap <$> get
         idForBlock <- nameDepth id . blockDepth <$> get
-        let dnaType = getDNAType structs datatype
+        let dnaType = getDNATypeForOperand structs dataType
             var = Local idForBlock dnaType
-            varOp = opVar var
-        setEnvironment (M.insert idForBlock var localEnv)
-        let newBlock = exprBlock ++ [Mov varOp resultOp]
-        return newBlock
+        if isArrayType dataType
+          then return $ exprBlock ++ [ArrayCopy (opVarRef var) resultOp (datatypeSize structs dataType)]
+          else return $ exprBlock ++ [Mov (opVar var) resultOp]
     generateIrHelper (BlockNode body) = do
         addDepth 1
         bodyBlock <- generateIr body
@@ -660,6 +659,26 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
                     ++ [Mov (opVar ptr) resultOp], ptrDeref)
         tryFreeOperand resultOp
         return newBlock
+    generateIrExprHelper exprType node@(UnaryOpNode op expr)
+        | op == PrefixInc = generateIrExpr $ annotExprType exprType (AssignmentNode PlusEq expr literal)
+        | op == PrefixDec = generateIrExpr $ annotExprType exprType (AssignmentNode MinusEq expr literal)
+        | otherwise       = error "Unhandled unary op"
+      where
+        literal
+            | isIntegralType exprType = annotExprType longType (LiteralNode (IntConstant 1))
+            | isPointerType exprType  = annotExprType longType (LiteralNode (IntConstant 1))
+            | otherwise = annotExprType floatType (LiteralNode (FloatConstant 1))
+    generateIrExprHelper exprType node@(PostfixOpNode op expr)
+        | op == PostInc = generatePostfix True
+        | op == PostDec = generatePostfix False
+        | otherwise     = error "Unhandled postfix operator"
+      where
+        generatePostfix adds = do
+            (subBlock, resultOp) <- generateIrExpr expr
+            beforeChange <- getTempVar (getOperandType resultOp)
+            let imm = Immediate (toRational 1) (getOperandType resultOp)
+            assnBody <- generateAssign (if adds then PlusEq else MinusEq) resultOp imm exprType
+            return (subBlock ++ [Mov (opVar beforeChange) resultOp] ++ assnBody, opVar beforeChange)
     generateIrExprHelper exprType node@(IdentifierNode name) = do
         env <- env <$> get
         var <- getLocal name
@@ -702,52 +721,12 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
         freeTempVar idxResult
         return newBlock
     generateIrExprHelper exprType node@(ParenthesisNode sub) = generateIrExpr sub
-    generateIrExprHelper exprType node@(AssignmentNode op lhs rhs)
-        | isArrayType $ typeOf lhs = do
-            structs <- structMap <$> get
-            (rightBlock, resultOp2) <- generateIrExpr rhs
-            (leftBlock, resultOp) <- generateIrExpr lhs
-            temp <- getTempVar $ Int64 1
-            let tempVar = opVar temp
-                assnInsts = case op of
-                    NoOp    -> [ArrayCopy resultOp resultOp2 copySize]
-                    PlusEq  -> [Mul tempVar resultOp2 (Immediate (toRational copySize) (Int64 1)),
-                                Add tempVar resultOp tempVar,
-                                ArrayCopy resultOp tempVar copySize]
-                    MinusEq -> [Mul tempVar resultOp2 (Immediate (toRational copySize) (Int64 1)),
-                                Sub tempVar resultOp tempVar,
-                                ArrayCopy resultOp tempVar copySize]
-                    _       -> error "Invalid pointer/assignop provided to generator"
-                  where
-                    copySize = datatypeSize structs exprType
-                newBlock = (rightBlock
-                         ++ leftBlock
-                         ++ assnInsts, resultOp)
-            tryFreeOperand resultOp2
-            freeTempVar temp
-            return newBlock
-        | otherwise = do
-            structs <- structMap <$> get
-            (rightBlock, resultOp2) <- generateIrExpr rhs
-            (leftBlock, resultOp) <- generateIrExpr lhs
-            let newRightBlock 
-                    | isPointerType $ typeOf lhs =
-                        rightBlock ++ [Mul resultOp2 resultOp2 (Immediate (toRational mulSize) (Int64 1))]
-                    | otherwise = rightBlock
-                    where
-                        mulSize = datatypeSize structs $ typeOf lhs
-            let assnInsts = case op of
-                    NoOp -> [Mov resultOp resultOp2]
-                    PlusEq -> [Add resultOp resultOp resultOp2]
-                    MinusEq -> [Sub resultOp resultOp resultOp2]
-                    MulEq -> [Mul resultOp resultOp resultOp2]
-                    DivEq -> [Div resultOp resultOp resultOp2]
-                    ModEq -> [Mod resultOp resultOp resultOp2]
-            let newBlock = (newRightBlock
-                        ++ leftBlock
-                        ++ assnInsts, resultOp)
-            tryFreeOperand resultOp2
-            return newBlock
+    generateIrExprHelper exprType node@(AssignmentNode op lhs rhs) = do
+        (rightBlock, resultOp2) <- generateIrExpr rhs
+        (leftBlock, resultOp) <- generateIrExpr lhs
+        assnBlock <- generateAssign op resultOp resultOp2 exprType
+        tryFreeOperand resultOp2
+        return (rightBlock ++ leftBlock ++ assnBlock, resultOp)
     generateIrExprHelper exprType node@(CastNode toType expr) = do
         let castType = exprToDNA toType
         (exprBlock, resultOp) <- generateIrExpr expr
@@ -766,7 +745,7 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
         structs <- structMap <$> get
         (AccessContext struct srcOp doDeref) <- accessCtx <$> get
         let memberOffset = getMemberOffset structs id struct
-            dnaType = getDNAType structs exprType
+            dnaType = getDNATypeForOperand structs exprType
         if doDeref
           then case srcOp of -- a->b
               Variable isRef var         -> return ([], MemoryRef isRef var memberOffset dnaType)
@@ -790,3 +769,35 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
 
         tryFreeOperand structOp
         return (lhsBlock ++ rhsBlock, valOp)
+
+generateAssign :: AssignmentOp -> DNAOperand -> DNAOperand -> DataType -> GeneratorAction DNABlock
+generateAssign op to from toType
+    | isPointerType toType = do
+        structs <- structMap <$> get
+        temp <- getTempVar $ Int64 1
+        let copySize = datatypeSize structs (second (drop 1) toType)
+            copyOp = if isArrayType toType
+                then ArrayCopy to tempVar copySize
+                else Mov to tempVar
+            tempVar = opVar temp
+            assnInsts = case op of
+                NoOp     
+                    | isArrayType toType -> [ArrayCopy to from copySize]
+                    | otherwise -> [Mov to from]
+                PlusEq  -> [Mul tempVar from (Immediate (toRational copySize) (Int64 1)),
+                            Add tempVar to tempVar,
+                            copyOp]
+                MinusEq -> [Mul tempVar from (Immediate (toRational copySize) (Int64 1)),
+                            Sub tempVar to tempVar,
+                            copyOp]
+                _       -> error "Invalid pointer/assignop provided to generator"
+        freeTempVar temp
+        return assnInsts
+    | otherwise = do
+        return $ case op of
+            NoOp -> [Mov to from]
+            PlusEq -> [Add to to from]
+            MinusEq -> [Sub to to from]
+            MulEq -> [Mul to to from]
+            DivEq -> [Div to to from]
+            ModEq -> [Mod to to from]

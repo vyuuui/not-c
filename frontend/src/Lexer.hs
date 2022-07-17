@@ -12,7 +12,7 @@ import Data.Tuple (swap)
 type LexerResult = (Token, Int, String)
 
 operators :: S.Set String
-operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!", "&", "->", "."]
+operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!", "&", "->", ".", "++", "--"]
 control :: S.Set String
 control = S.fromList ["if", "else", "for", "while", "return", "break", "continue"]
 punctuation :: S.Set String

@@ -91,9 +91,6 @@ peekTwoToken = do
             tok2 <- lexNewToken
             return (tok1, tok2)
 
--- Helper to unwrap the String part of certain tokens
--- error should never be hit, as below helpers should avoid invalid calls
-
 -- Generic helpers to validate a token given a predicate (and extract)
 extractStrIfValid :: (Token -> Bool) -> String -> Token -> ParseAction String
 extractStrIfValid check tokenClass token =
@@ -269,7 +266,7 @@ isBlock, isExpression, isLvalue, isConditional, isWhileLoop, isForLoop, isReturn
 isBlock = punctuationMatches "{"
 isExpression tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(",
                                 operatorMatches "!", operatorMatches "&", operatorMatches "*",
-                                operatorMatches "-"]
+                                operatorMatches "-", operatorMatches "++", operatorMatches "--"]
 isLvalue tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(", punctuationMatches "*" ]
 isConditional = controlMatches "if"
 isWhileLoop = controlMatches "while"
@@ -344,14 +341,16 @@ parseCondition = do
     expressionNode <- doAnnotateSyntax parseWrapExpression
     eatPunctuation ")"
     block <- doAnnotateSyntax parseBlock
-    maybeElse <- peekToken
-    if controlMatches "else" maybeElse
-        then do
-            eatControl "else"
-            elseBlock <- doAnnotateSyntax parseBlock
-            return $ IfElseNode expressionNode block elseBlock
-        else do
-            return $ IfNode expressionNode block
+    (maybeElse, maybeIf) <- peekTwoToken
+    if | controlMatches "else" maybeElse && controlMatches "if" maybeIf -> do
+           eatControl "else"
+           elseBlock <- doAnnotateSyntax parseCondition
+           return $ IfElseNode expressionNode block elseBlock
+       | controlMatches "else" maybeElse -> do
+           eatControl "else"
+           elseBlock <- doAnnotateSyntax parseBlock
+           return $ IfElseNode expressionNode block elseBlock
+       | otherwise -> return $ IfNode expressionNode block
 
 parseWhileLoop :: ParseAction (SyntaxNodeF SyntaxNode)
 parseWhileLoop = do
@@ -536,15 +535,21 @@ parseUnary = do
        | operatorMatches "*" maybeOp -> do
              eatToken
              UnaryOpNode Dereference <$> doAnnotateExpr parseUnary
+       | operatorMatches "++" maybeOp -> do
+             eatToken
+             UnaryOpNode PrefixInc <$> doAnnotateExpr parseUnary
+       | operatorMatches "--" maybeOp -> do
+             eatToken
+             UnaryOpNode PrefixDec <$> doAnnotateExpr parseUnary
        | otherwise -> parseIndirection
 
 parseIndirection :: ParseAction (ExprF Expr)
 parseIndirection = do
     (lookahead, lookahead2) <- peekTwoToken
-    posPrint <- getLexPosition
-    if isIdentifier lookahead && punctuationMatches "(" lookahead2
-      then doAnnotateExpr parseCall >>= tryParseArray >>= tryParseMemberAccess
-      else doAnnotateExpr parseBaseExpr >>= tryParseArray >>= tryParseMemberAccess
+    rootExpr <- if isIdentifier lookahead && punctuationMatches "(" lookahead2
+                  then doAnnotateExpr parseCall
+                  else doAnnotateExpr parseBaseExpr
+    parseIndirectionTrail rootExpr
   where
     parseCall :: ParseAction (ExprF Expr)
     parseCall = do
@@ -553,52 +558,33 @@ parseIndirection = do
         argList <- parseArgList
         eatPunctuation ")"
         return $ FunctionCallNode id argList
-    tryParseArray :: Expr -> ParseAction Expr
-    tryParseArray node = do
-        arrayIdxs <- whileM (punctuationMatches "[" <$> peekToken) parseArrayIndex 
-        let rootNode = L.foldl' foldArrayIndex node arrayIdxs
-        return rootNode
-      where
-        parseArrayIndex :: ParseAction (Expr, Int)
-        parseArrayIndex = do
-            eatPunctuation "["
-            arrayIdx <- doAnnotateExpr parseExpression
-            eatPunctuation "]"
-            arrEndLoc <- getLexPosition
-            return (arrayIdx, arrEndLoc)
-        foldArrayIndex :: Expr -> (Expr, Int) -> Expr
-        foldArrayIndex acc (rhs, rhsEndLoc) = annotExprLoc location (ArrayIndexNode acc rhs)
-          where
-            location = SourceLoc (srcBegin $ sourceLocOf acc) rhsEndLoc
-    tryParseMemberAccess :: Expr -> ParseAction (ExprF Expr)
-    tryParseMemberAccess node = do
-        memberAccesses <- whileM (continueParsingMembers <$> peekToken) parseMemberAccess 
-        let rootNode = L.foldl' foldMemberAccess node memberAccesses
-        return $ getExprF rootNode
-      where
-        foldMemberAccess :: Expr -> (Expr, Bool) -> Expr
-        foldMemberAccess a (node, isPtr) = annotExprLoc (getBounds a node) (MemberAccessNode isPtr a node)
-        continueParsingMembers :: Token -> Bool
-        continueParsingMembers token = operatorMatches "." token || operatorMatches "->" token
-        -- Parses a single ". identifier ('[' expression ']')*"
-        parseMemberAccess :: ParseAction (Expr, Bool)
-        parseMemberAccess = do
-            lookahead <- peekToken
-            if | operatorMatches "." lookahead  -> do
-                     eatOperator "."
-                     membStart <- getLexPosition
-                     idNode <- scanIdentifier <&> StructMemberNode
-                     membEnd <- getLexPosition
-                     rhs <- tryParseArray (annotExprLoc (SourceLoc membStart membEnd) idNode)
-                     return (rhs, False)
-               | operatorMatches "->" lookahead -> do
-                     eatOperator "->"
-                     membStart <- getLexPosition
-                     idNode <- scanIdentifier <&> StructMemberNode
-                     membEnd <- getLexPosition
-                     rhs <- tryParseArray (annotExprLoc (SourceLoc membStart membEnd) idNode)
-                     return (rhs, True)
-               | otherwise                      -> raiseFailureHere "Unexpected token when parsing member access"
+
+parseIndirectionTrail :: Expr -> ParseAction (ExprF Expr)
+parseIndirectionTrail root = do
+    lookahead <- peekToken
+    if | operatorMatches "++" lookahead -> parsePost PostInc
+       | operatorMatches "--" lookahead ->  parsePost PostDec
+       | operatorMatches "." lookahead -> parseMemberAccess False
+       | operatorMatches "->" lookahead -> parseMemberAccess True
+       | punctuationMatches "[" lookahead ->  parseSubscript
+       | otherwise -> return $ getExprF root
+  where
+    parsePost :: PostfixOp -> ParseAction (ExprF Expr)
+    parsePost op = do
+        eatToken
+        doAnnotateExpr (return $ PostfixOpNode op root) >>= parseIndirectionTrail 
+    parseMemberAccess :: Bool -> ParseAction (ExprF Expr)
+    parseMemberAccess isPtr = do
+        eatToken
+        member <- doAnnotateExpr $ StructMemberNode <$> scanIdentifier
+        doAnnotateExpr (return $ MemberAccessNode isPtr root member) >>= parseIndirectionTrail
+    parseSubscript :: ParseAction (ExprF Expr)
+    parseSubscript = do
+        eatToken
+        trace "Parsing subscript" return ()
+        idx <- doAnnotateExpr parseExpression
+        eatPunctuation "]"
+        doAnnotateExpr (return $ ArrayIndexNode root idx) >>= parseIndirectionTrail
 
 parseBaseExpr :: ParseAction (ExprF Expr)
 parseBaseExpr = do
@@ -676,7 +662,7 @@ forinit = declaration | assignment | ε
 forexpr = expression | ε
 forloop = 'for' '(' forinit ';' forexpr ';' forexpr ')' block
 conditional = 'if' '(' expression ')' block elseconditional
-elseconditional = 'else' block | ε
+elseconditional = 'else' 'if' block elseconditional | 'else' block | ε
 ret = 'return' expression
 expression = assignment
 assignment = lvalue '=' assignment  | lvalue '+=' assignment |
@@ -689,10 +675,15 @@ eqcomp = ordcomp ('==' ordcomp)* | ordcomp ('!=' orcomp)*
 ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' addition)* | addition ('>=' addition)*
 addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
 multiplication = unary ('*' unary)* | unary ('/' unary)* | unary ('%' unary)*
-unary = '-' unary | '!' unary | '&' unary | '*' unary | '(' type ')' | indirection
-indirection = identifier '(' arglist ')' ('[' expression ']')* memberaccess*
-            | baseexpr ('[' expression ']')* memberaccess* 
-memberaccess = '.' identifier ('[' expression ']')*
+unary = '-' unary | '!' unary | '&' unary | '*' unary | '(' type ')' |
+        '++' unary | '--' unary | indirection
+indirection = identifier '(' arglist ')' indirection_rest |
+              baseexpr indirection_rest 
+indirection_trail = '++' indirection_trail |
+                    '--' indirection_trail |
+                    '.' identifier indirection_trail |
+                    '[' expression ']' indirection_trail |
+                    ε
 baseexpr = identifier | constant | '(' expression ')'
 arglist = expression (',' expression)* | ε
 type = identifier qualifier

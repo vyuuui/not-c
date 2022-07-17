@@ -52,6 +52,10 @@ showExprTreeLn expr = case getCompose $ unFix expr of
             rhsLns = rewriteHead "├─" $ map ("│ " ++) $ showExprTreeLn rhs
             lhsLns = rewriteHead "└─" $ map ("  "++) $ showExprTreeLn lhs
         in  header ++ (rhsLns ++ lhsLns)
+    (annot, PostfixOpNode op sub) ->
+        let header = ["PostfixOp : " ++ show op ++ " : " ++ show annot]
+            subLns = rewriteHead "└─" $ map ("  " ++) $ showExprTreeLn sub
+        in  header ++ subLns
     (annot, MemberAccessNode op str mem) ->
         let header = ["MemberAccess " ++ show op ++ " : " ++ show annot]
             memLns = rewriteHead "├─" $ map ("│ " ++) $ showExprTreeLn mem

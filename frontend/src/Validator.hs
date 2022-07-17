@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
+-- {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 module Validator ( validateProgram ) where
 
 import CompilerShared
@@ -149,16 +149,6 @@ isPrimitiveType (typename, _) = S.member typename baseTypes
 
 isStructType :: DataType -> StructMap -> Bool
 isStructType (typename, _) = M.member typename
-
-isIntegralType :: DataType -> Bool
-isIntegralType (typename, ptrList)
-    | typename == "char"  = isntPtr
-    | typename == "short" = isntPtr
-    | typename == "int"   = isntPtr
-    | typename == "long"  = isntPtr
-    | otherwise           = False
-  where
-    isntPtr = null ptrList
 
 isImplicitCastAllowed :: DataType -> DataType -> Bool
 isImplicitCastAllowed toType@(toName, toPtr) fromType@(fromName, fromPtr) =
@@ -434,13 +424,18 @@ binaryTypeResult structs op lhsType rhsType
     decideDivision :: (DataType, DataType, DataType)
     decideDivision = decideMultiplication
 
-unaryTypeResult :: UnaryOp -> DataType -> (DataType, Handedness)
-unaryTypeResult op subType
+compoundAssignable :: DataType -> Bool
+compoundAssignable tp = isIntegralType tp || (isPointerType tp && not (isArrayType tp)) || isFloatType tp
+
+unaryTypeResult :: UnaryOp -> (DataType, Handedness) -> (DataType, Handedness)
+unaryTypeResult op (subType, subHandedness)
     | subType == invalidType = (invalidType, RValue)
     | op == Negate           = decideNegate subType
     | op == Not              = decideNot subType
     | op == Reference        = decideReference subType
     | op == Dereference      = decideDereference subType
+    | op == PrefixInc        = decidePrefix subType
+    | op == PrefixDec        = decidePrefix subType
     | otherwise              = (invalidType, RValue)
   where
     decideNegate :: DataType -> (DataType, Handedness)
@@ -457,6 +452,11 @@ unaryTypeResult op subType
     decideDereference (typeName, ptrList)
         | not (null ptrList) = ((typeName, tail ptrList), LValue)
         | otherwise          = (invalidType, LValue)
+    decidePrefix :: DataType -> (DataType, Handedness)
+    decidePrefix tp
+        | subHandedness == RValue = (invalidType, RValue)
+        | compoundAssignable tp  = (tp, RValue)
+        | otherwise               = (invalidType, RValue)
 
 -- This is the core typechecking function
 -- It will act as both the typechecker as well as the cast generator for a full Expr tree
@@ -519,7 +519,7 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
     alg (ExprInfo _ _ sl, n@(ArrayIndexNode arr idx))
         | not $ isIntegralType $ typeOf idx = (ExprInfo invalidType RValue sl, n)
         | otherwise =
-            (uncurry3 ExprInfo (combine3 (unaryTypeResult Dereference $ typeOf arr) sl), n)
+            (uncurry3 ExprInfo (combine3 (unaryTypeResult Dereference (typeOf arr, handednessOf arr)) sl), n)
     alg (ExprInfo _ _ sl, n@(ParenthesisNode sub)) = (ExprInfo (typeOf sub) (handednessOf sub) sl, n)
     alg (ExprInfo _ _ sl, n@(BinaryOpNode op lhs rhs))
         | typeOf lhsCast == invalidType = (ExprInfo invalidType RValue sl, BinaryOpNode op lhsCast rhsCast)
@@ -534,7 +534,14 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         | op == Reference && not (isIdVar sub) = (ExprInfo invalidType RValue sl, n)
         | otherwise                            = (ExprInfo uType uHand sl, n)
       where
-        (uType, uHand) = unaryTypeResult op $ typeOf sub
+        (uType, uHand) = unaryTypeResult op (typeOf sub, handednessOf sub)
+    alg (ExprInfo _ _ sl, n@(PostfixOpNode op sub))
+        | typeOf sub == invalidType  = (ExprInfo invalidType RValue sl, n)
+        | handednessOf sub /= LValue = (ExprInfo invalidType RValue sl, n)
+        | compoundAssignable (typeOf sub) = (ExprInfo (typeOf sub) RValue sl, n)
+        | otherwise = (ExprInfo invalidType RValue sl, n)
+      where
+        typeChecks = [isIntegralType, isFloatType, (isPointerType &&& (not . isArrayType)) >>> uncurry (&&)]
     alg (ExprInfo _ _ sl, n@(AssignmentNode NoOp lhs rhs)) -- TODO: this should probably be broken into a (x) = x op y | op /= NoOp
         | typeOf lhs == invalidType          = (ExprInfo invalidType LValue sl, n)
         | typeOf newRhs == invalidType       = (ExprInfo invalidType LValue sl, AssignmentNode NoOp lhs newRhs)
@@ -543,13 +550,13 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
       where
         newRhs = castOrInvalid rhs $ typeOf lhs
     alg (ExprInfo _ _ sl, n@(AssignmentNode op lhs rhs))
-        | typeOf lhs == invalidType                                        = (ExprInfo invalidType LValue sl, n)
-        | typeOf rhs == invalidType                                        = (ExprInfo invalidType LValue sl, n)
-        | handednessOf lhs /= LValue                                       = (ExprInfo invalidType LValue sl, n)
-        | not (isPrimitiveType (typeOf lhs) || isPointerType (typeOf lhs)) = (ExprInfo invalidType LValue sl, n)
-        | rhsType == invalidType                                           = (ExprInfo invalidType LValue sl, AssignmentNode op lhs rhsCast)
-        | not (isImplicitCastAllowed lhsType binOpType)                    = (ExprInfo invalidType LValue sl, AssignmentNode op lhs rhsCast)
-        | otherwise                                                        = (ExprInfo lhsType LValue sl, AssignmentNode op lhs rhsCast)
+        | typeOf lhs == invalidType                     = (ExprInfo invalidType LValue sl, n)
+        | typeOf rhs == invalidType                     = (ExprInfo invalidType LValue sl, n)
+        | handednessOf lhs /= LValue                    = (ExprInfo invalidType LValue sl, n)
+        | not $ compoundAssignable $ typeOf lhs        = (ExprInfo invalidType LValue sl, n)
+        | rhsType == invalidType                        = (ExprInfo invalidType LValue sl, AssignmentNode op lhs rhsCast)
+        | not $ isImplicitCastAllowed lhsType binOpType = (ExprInfo invalidType LValue sl, AssignmentNode op lhs rhsCast)
+        | otherwise                                     = (ExprInfo lhsType LValue sl, AssignmentNode op lhs rhsCast)
       where
         convertBinaryOp PlusEq = Addition
         convertBinaryOp MinusEq = Subtraction
@@ -563,35 +570,27 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
     -- This is very stupid, I hate throwing context & state into expressions like this, it really shouldn't happen 
     alg (ExprInfo _ _ sl, n@(MemberAccessNode isPtr lhs rhs))
         | typeOf lhs == invalidType             = (ExprInfo invalidType LValue sl, n)
-        | isPtr && isBasePointer (typeOf lhs)   = memberAccessHelper maybeStructDef
-        | not isPtr && isValueType (typeOf lhs) = memberAccessHelper maybeStructDef
+        | isPtr && isBasePointer (typeOf lhs)   = fixMemberAccess
+        | not isPtr && isValueType (typeOf lhs) = fixMemberAccess
         | otherwise                             = (ExprInfo invalidType LValue sl, n)
       where
-        memberAccessHelper :: Maybe StructDefinition -> (ExprInfo, ExprF Expr)
-        memberAccessHelper (Just def) = (ExprInfo (typeOf rhsFixed) LValue sl, MemberAccessNode isPtr lhs rhsFixed)
-          where
-            rhsFixed = computeMemberAccess def rhs
-        memberAccessHelper _          = (ExprInfo invalidType LValue sl, n)
-        maybeStructDef :: Maybe StructDefinition
-        maybeStructDef = M.lookup (fst $ typeOf lhs) structs
+        fixMemberAccess :: (ExprInfo, ExprF Expr)
+        fixMemberAccess =
+            let fixedRhs = maybe (ExprInfo invalidType LValue sl, n)
+                  (fixStructMember $ getCompose $ unFix rhs)
+                  (M.lookup (fst $ typeOf lhs) structs)
+                annotRhs = Fix $ Compose fixedRhs
+            in (ExprInfo (typeOf annotRhs) LValue sl, MemberAccessNode isPtr lhs annotRhs)
+        fixStructMember :: (ExprInfo, ExprF Expr) -> StructDefinition -> (ExprInfo, ExprF Expr)
+        fixStructMember (ExprInfo _ _ sl, n@(StructMemberNode name)) struct =
+            (ExprInfo (getMemberType struct name) LValue sl, n)
+        fixStructMember _ _ = error "Member access contains non-struct-member rhs"
     alg (ExprInfo _ _ sl, n@(CastNode dataType sub)) = -- TODO: add checks for explicit cast
         if typeOf sub == invalidType
           then (ExprInfo invalidType (handednessOf sub) sl, n)
           else (ExprInfo dataType (handednessOf sub) sl, n)
     -- This will be dealt with by recomputeDeclWithStruct
     alg (ExprInfo _ _ sl, n@(StructMemberNode _)) = (ExprInfo invalidType LValue sl, n)
-
-    -- why do structs even exist? I kinda just hate them
-    computeMemberAccess :: StructDefinition -> Expr -> Expr
-    computeMemberAccess struct = foldFix (Fix . Compose . alg . getCompose)
-      where
-        alg :: (ExprInfo, ExprF Expr) -> (ExprInfo, ExprF Expr)
-        alg (ExprInfo _ _ sl, n@(StructMemberNode name)) =
-            (ExprInfo (getMemberType struct name) LValue sl, n)
-        alg (ExprInfo _ _ sl, n@(ArrayIndexNode arr idx))
-            | not $ isIntegralType $ typeOf idx = (ExprInfo invalidType RValue sl, n)
-            | otherwise = (uncurry3 ExprInfo (combine3 (unaryTypeResult Dereference $ typeOf arr) sl), n)
-        alg n = n
 
 data ExprError = ExprError
     { location :: SourceLoc
@@ -610,6 +609,9 @@ findExprError env structs expr =
     subType t = case t of
         Left _ -> invalidType
         Right info -> dataType info
+    subHandedness t = case t of
+        Left _ -> RValue
+        Right info -> handedness info
     showSub t = showDt $ subType t
 
     makeErr :: (ExprInfo, ExprF a) -> String -> ErrOrType
@@ -649,11 +651,26 @@ findExprError env structs expr =
     alg n@(info, UnaryOpNode op sub)
         | isLeft sub = sub
         | dataType info == invalidType = case op of
-            Negate      -> makeErr n $ "Can't negate non-integral or non-float type " ++ showSub sub
-            Not         -> makeErr n $ "Can't apply not to non-boolean type " ++ showSub sub
-            Reference   -> makeErr n "Can't take the reference of non-identifier"
-            Dereference -> makeErr n $ "Can't dereference non-pointer type " ++ showSub sub
+            Negate                            -> makeErr n $ "Can't negate non-integral or non-float type " ++ showSub sub
+            Not                               -> makeErr n $ "Can't apply not to non-boolean type " ++ showSub sub
+            Reference                         -> makeErr n "Can't take the reference of non-identifier"
+            Dereference                       -> makeErr n $ "Can't dereference non-pointer type " ++ showSub sub
+            PrefixInc
+                | subHandedness sub == RValue -> makeErr n "Can't do prefix ++ of r-value"
+                | otherwise                   -> makeErr n $ "Can't do prefix ++ on type " ++ showSub sub
+            PrefixDec
+                | subHandedness sub == RValue -> makeErr n "Can't do prefix -- of r-value"
+                | otherwise                   -> makeErr n $ "Can't do prefix -- on type " ++ showSub sub
         | otherwise = Right info
+    alg n@(info, PostfixOpNode op sub)
+        | isLeft sub = sub
+        | dataType info == invalidType = sub >>= makeErr n . postErr
+        | otherwise = Right info
+      where
+        postErr :: ExprInfo -> String
+        postErr (ExprInfo subt subh _)
+            | subh == RValue = "Can't do postfix " ++ show op ++ " on r-value"
+            | otherwise      = "Can't do postfix " ++ show op ++ " on type " ++ showSub sub
     alg n@(info, AssignmentNode op lhs rhs)
         | isLeft lhs = lhs
         | isLeft rhs = rhs
@@ -675,11 +692,11 @@ findExprError env structs expr =
         | not isPtr && isPointerType (subType lhs)   = makeErr n $ "Can't do '.' on pointer-type " ++ showSub lhs
         | isPtr && not (isPointerType (subType lhs)) = makeErr n $ "Can't do '->' on value-type " ++ showSub lhs
         | not $ M.member (fst (subType lhs)) structs = makeErr n $ "No struct found named " ++ fst (subType lhs)
-        | isLeft rhs = case rhs of
+        | otherwise = case rhs of
             Left errInfo -> case nodeType errInfo of
                 StructMemberNode name -> makeErr n $ "No member " ++ name ++ " of struct " ++ fst (subType lhs)
                 _                     -> rhs
-        | otherwise = Right info
+            _            -> Right info
     alg n@(info, CastNode castType sub)
         | isLeft sub = sub
         | dataType info == invalidType = makeErr n $ "Can not cast from " ++ showSub sub ++ " to " ++ showDt castType

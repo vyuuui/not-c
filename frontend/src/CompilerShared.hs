@@ -115,6 +115,17 @@ isVoidType = (==voidType)
 isBasePointer (_, [_]) = True
 isBasePointer _        = False
 
+isIntegralType :: DataType -> Bool
+isIntegralType (typename, ptrList)
+    | typename == "char"  = isntPtr
+    | typename == "short" = isntPtr
+    | typename == "int"   = isntPtr
+    | typename == "long"  = isntPtr
+    | otherwise           = False
+  where
+    isntPtr = null ptrList
+
+
 classifySize :: String -> Int
 classifySize tp
     | tp == "char"   = 1
@@ -161,6 +172,7 @@ data ExprF r
     | ParenthesisNode r
     | BinaryOpNode BinaryOp r r
     | UnaryOpNode UnaryOp r
+    | PostfixOpNode PostfixOp r
     | AssignmentNode AssignmentOp r r
     | MemberAccessNode Bool r r
     | CastNode DataType r
@@ -196,7 +208,11 @@ data UnaryOp
     | Not
     | Reference
     | Dereference
+    | PrefixInc
+    | PrefixDec
     deriving (Show, Eq)
+
+data PostfixOp = PostInc | PostDec deriving (Show, Eq)
 
 data ExprInfo = ExprInfo
     { dataType :: DataType
@@ -212,6 +228,8 @@ annotExpr :: DataType -> Handedness -> SourceLoc -> ExprF Expr -> Expr
 annotExpr tp hd sl = (Fix . Compose) . (,) (ExprInfo tp hd sl)
 annotExprEmpty :: ExprF Expr -> Expr
 annotExprEmpty = annotExpr invalidType LValue (SourceLoc 0 0)
+annotExprType :: DataType -> ExprF Expr -> Expr
+annotExprType tp = annotExpr tp LValue (SourceLoc 0 0)
 annotExprLoc :: SourceLoc -> ExprF Expr -> Expr
 annotExprLoc = annotExpr invalidType LValue
 typeOf :: Expr -> DataType
