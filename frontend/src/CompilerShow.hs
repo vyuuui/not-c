@@ -20,13 +20,15 @@ showExprTreeLn expr = case getCompose $ unFix expr of
     (annot, IdentifierNode id) -> ["Id " ++ id ++ " : " ++ show annot]
     (annot, StructMemberNode id) -> ["Member " ++ id ++ " : " ++ show annot]
     (annot, LiteralNode ct) -> ["Literal " ++ show ct ++ " : " ++ show annot]
-    (annot, FunctionCallNode name args) ->
-        let header = ["Call " ++ name ++ " : " ++ show annot]
-            children = (arr init &&& arr last) (map showExprTreeLn (reverse args))
-            childrenShift = (arr (map . map) ("│ " ++) *** arr (map ("  "++))) children
-            markedHeads = (first (arr (fmap (rewriteHead "├─"))) >>> second (arr (rewriteHead "└─"))) childrenShift
-            combined = arr (\(hds, tl) -> concat hds ++ tl) markedHeads
-        in  header ++ combined
+    (annot, FunctionCallNode name args)
+        | null args -> ["Call " ++ name ++ " : " ++ show annot]
+        | otherwise -> 
+            let header = ["Call " ++ name ++ " : " ++ show annot]
+                children = (arr init &&& arr last) (map showExprTreeLn (reverse args))
+                childrenShift = (arr (map . map) ("│ " ++) *** arr (map ("  "++))) children
+                markedHeads = (first (arr (fmap (rewriteHead "├─"))) >>> second (arr (rewriteHead "└─"))) childrenShift
+                combined = arr (\(hds, tl) -> concat hds ++ tl) markedHeads
+            in  header ++ combined
     (annot, ArrayIndexNode arr idx) ->
         let header = ["ArrIndex : " ++ show annot]
             arrLns = rewriteHead "├─" $ map ("│ " ++) $ showExprTreeLn arr
@@ -130,11 +132,11 @@ instance Show FunctionDefinition where
       where
         paramsStr = showDeclList ", " params
 
-instance Show StructDefinition where
-    show (StructDefinition (name, members)) =
-        "struct " ++ (name ++ (" {\n  " ++ (membersStr ++ "}")))
-      where
-        membersStr = showDeclList ";\n  " members
+-- instance Show StructDefinition where
+--     show (name, members) =
+--         "struct " ++ (name ++ (" {\n  " ++ (membersStr ++ "}")))
+--       where
+--         membersStr = showDeclList ";\n  " members
 
 instance Show Token where
     show (Identifier id) = "id '" ++ id ++ "'"
@@ -190,7 +192,7 @@ instance Show DNAVariable where
 
 showVarHdr :: DNAVariable -> [Char]
 showVarHdr (Temp name tp)  = "temp " ++ name ++ ' ':show tp
-showVarHdr (Input name tp) = "input " ++ name ++ ' ':show tp
+showVarHdr (Input name tp) = "in " ++ name ++ ' ':show tp
 showVarHdr (Local name tp) = "local " ++ name ++ ' ':show tp
 
 instance Show DNAInstruction where
@@ -202,14 +204,14 @@ instance Show DNAInstruction where
     show (Mod dst src1 src2) = "mov" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
     show (Cmp lhs rhs) = "cmp" ++ (' ':show lhs) ++ (' ':show rhs)
     show (Jmp cond lbl) = "j" ++ show cond ++ (' ':lbl)
-    show (Param op) = "param" ++ (' ':show op)
+    show (Param op tp) = "param" ++ (' ':show op) ++ (' ':show tp)
     show (Call name output) = "call" ++ (' ':name) ++ (' ':show output)
     show (ReturnVal value) = "return" ++ (' ':show value)
-    show ReturnVoid = "return"
-    show ArrayCopy {} = error "implement me later"
-    show (IntToFloat op1 op2) = "inttofloat " ++ (' ':show op1) ++ (' ':show op2)
-    show (FloatToInt op1 op2) = "floattoint " ++ (' ':show op1) ++ (' ':show op2)
-    show (Label lbl) = ".label " ++ (' ':lbl)
+    show ReturnVoid = "return $nil"
+    show (ArrayCopy op1 op2 count) = "arraycopy" ++ (' ':show op1) ++ (' ':show op2) ++ (' ':show count)
+    show (IntToFloat op1 op2) = "inttofloat" ++ (' ':show op1) ++ (' ':show op2)
+    show (FloatToInt op1 op2) = "floattoint" ++ (' ':show op1) ++ (' ':show op2)
+    show (Label lbl) = ".label" ++ (' ':lbl)
 
 showFunction :: DNAFunctionDefinition -> String
 showFunction (name, vars, body) =

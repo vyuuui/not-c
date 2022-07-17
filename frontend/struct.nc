@@ -1,13 +1,12 @@
-struct test {
-    int mem1;
-    float mem2;
+int proof_my_compiler_works(int fac) {
+    long i;
+    long out = 1;
+    for (i = 1; i <= fac; i+=1) {
+        out *= i;
+    }
+    return out;
 }
 
 int main() {
-    int x;
-    test t;
-    t.mem1 = x;
-    test* t2;
-    t2->mem1 = 1.0 * x;
-    return 0;
+    return proof_my_compiler_works(10);
 }

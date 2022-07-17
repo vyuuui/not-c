@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 module Validator ( validateProgram ) where
 
 import CompilerShared
@@ -6,6 +7,7 @@ import Control.Arrow
 import Control.Monad
 import Control.Monad.Loops
 import Control.Monad.Trans.State.Lazy
+import Data.Either
 import Data.Fix
 import Data.Functor ((<&>))
 import Data.Functor.Compose
@@ -58,7 +60,7 @@ putEnvironment newEnv = modify (\(GeneratorState structs env) -> GeneratorState 
 putStructs :: StructMap -> GeneratorAction ()
 putStructs newStructs = modify (\(GeneratorState structs env) -> GeneratorState newStructs env)
 addStruct :: StructDefinition -> GeneratorAction ()
-addStruct struct@(StructDefinition (name, _)) =
+addStruct struct@(name, _) =
     get >>= putStructs . M.insert name struct . structMap
 
 pushEnvironment :: Bool -> GeneratorAction ()
@@ -110,7 +112,7 @@ validateProgram (funcs, structs) =
             pushEnvironment False
             addFunctionParameters params $ paramsLoc sl
             insertIntoEnv "$currentFunction" (FunctionVar rtype [])
-            body <- validateSyntaxNode body
+            body <- skipBlockAndValidate body
             unless (isVoidType rtype) (validateReturns body)
             popEnvironment
             return $ FunctionDefinition rtype fname params body sl
@@ -124,7 +126,7 @@ validateProgram (funcs, structs) =
                 mapZip = mapM_ (\((dataType, id), sl) -> createVariable dataType sl >>= insertIntoEnv id)
 
 validateStruct :: StructDefinition -> GeneratorAction ()
-validateStruct (StructDefinition (name, memberList)) = do
+validateStruct (name, memberList) = do
     curStructs <- structMap <$> get
     unless
       (all (validateMember curStructs) memberList && membersUnique (map snd memberList))
@@ -159,10 +161,10 @@ isIntegralType (typename, ptrList)
     isntPtr = null ptrList
 
 isImplicitCastAllowed :: DataType -> DataType -> Bool
-isImplicitCastAllowed toType fromType =
+isImplicitCastAllowed toType@(toName, toPtr) fromType@(fromName, fromPtr) =
     implicitCastAllowedSingle toType fromType ||
     implicitCastAllowedSingle fromType toType ||
-    isPointerCastAllowed toType fromType
+    isPointerCastAllowed
   where
     implicitCastAllowedSingle :: DataType -> DataType -> Bool
     implicitCastAllowedSingle type1 type2
@@ -170,13 +172,11 @@ isImplicitCastAllowed toType fromType =
         | type1 == type2                               = True
         | isIntegralType type1 && isIntegralType type2 = True
         | otherwise                                    = False
-
-isPointerCastAllowed :: DataType -> DataType -> Bool
-isPointerCastAllowed (toType, toPtr) (fromType, fromPtr) =
-    not (null toPtr) &&
-    toType == fromType &&
-    length toPtr == length fromPtr &&
-    last toPtr == 0
+    isPointerCastAllowed =
+        not (null toPtr) &&
+        toName == fromName &&
+        length toPtr == length fromPtr &&
+        last toPtr == 0
 
 -- Syntax Tree actions (Stateful)
 -- Needs to modify state to trace variable declarations and scope changes
@@ -186,6 +186,14 @@ canShadow varName = get <&> canShadowHelper varName . environment
     canShadowHelper :: String -> Environment -> Bool
     canShadowHelper varName ((EnvBlock _ map):_) = not $ M.member varName map
     canShadowHelper varName [] = True
+
+skipBlockAndValidate :: SyntaxNode -> GeneratorAction SyntaxNode
+skipBlockAndValidate node = do
+    let (loc, nodeF) = getCompose $ unFix node
+    result <- case nodeF of
+        (BlockNode sub) -> validateSyntaxNode sub
+        _               -> raiseFailureLoc "Expected to find a block" loc
+    return $ Fix $ Compose (loc, BlockNode result)
 
 validateSyntaxNode :: SyntaxNode -> GeneratorAction SyntaxNode
 validateSyntaxNode node = do
@@ -265,7 +273,8 @@ validateSyntaxNode node = do
           (failCantCastCondition condType)
         -- TODO: maybe add implicit casts to bool if we ever change our minds?
         expr <- validateSyntaxNode expr
-        block <- validateSyntaxNode block
+        -- We want to count the for body in the same "scope" as the iterator
+        block <- skipBlockAndValidate block
         popEnvironment
         return $ ForNode init condition expr block
     validateSyntaxNodeF (IfNode condition block) = do
@@ -460,12 +469,12 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
     castOrInvalid expr toType
         | dataType == invalidType               = expr
         | dataType == toType                    = expr
-        | isImplicitCastAllowed dataType toType = castExpr toType 
-        | otherwise                             = castExpr invalidType 
+        | isImplicitCastAllowed toType dataType = castExpr toType toType
+        | otherwise                             = castExpr invalidType toType
       where
         (ExprInfo dataType hd sl, exprNode) = getCompose $ unFix expr
-        castExpr :: DataType -> Expr
-        castExpr toType = Fix $ Compose (ExprInfo toType hd sl, CastNode toType expr)
+        castExpr :: DataType -> DataType -> Expr
+        castExpr lblType toType = Fix $ Compose (ExprInfo lblType hd sl, CastNode toType expr)
 
     -- By our bottom-up typecheck, if it is identifier & valid, then it must be prim/struct
     isIdVar :: Expr -> Bool
@@ -522,13 +531,30 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         | otherwise                            = (ExprInfo uType uHand sl, UnaryOpNode op sub)
       where
         (uType, uHand) = unaryTypeResult op $ typeOf sub
-    alg (ExprInfo _ _ sl, n@(AssignmentNode op lhs rhs)) -- TODO: this should probably be broken into a (x) = x op y | op /= NoOp
-        | typeOf lhs == invalidType    = (ExprInfo invalidType LValue sl, n)
-        | typeOf newRhs == invalidType = (ExprInfo invalidType LValue sl, n)
-        | handednessOf lhs /= LValue   = (ExprInfo invalidType LValue sl, n)
-        | otherwise                    = (ExprInfo (typeOf lhs) LValue sl, AssignmentNode op lhs newRhs)
+    alg (ExprInfo _ _ sl, n@(AssignmentNode NoOp lhs rhs)) -- TODO: this should probably be broken into a (x) = x op y | op /= NoOp
+        | typeOf lhs == invalidType          = (ExprInfo invalidType LValue sl, n)
+        | typeOf newRhs == invalidType       = (ExprInfo invalidType LValue sl, n)
+        | handednessOf lhs /= LValue         = (ExprInfo invalidType LValue sl, n)
+        | otherwise                          = (ExprInfo (typeOf lhs) LValue sl, AssignmentNode NoOp lhs newRhs)
       where
         newRhs = castOrInvalid rhs $ typeOf lhs
+    alg (ExprInfo _ _ sl, n@(AssignmentNode op lhs rhs)) -- TODO: this should probably be broken into a (x) = x op y | op /= NoOp
+        | lhsType == invalidType                                           = (ExprInfo invalidType LValue sl, n)
+        | rhsType == invalidType                                           = (ExprInfo invalidType LValue sl, n)
+        | handednessOf lhs /= LValue                                       = (ExprInfo invalidType LValue sl, n)
+        | not $ isPrimitiveType (typeOf lhs) || isPointerType (typeOf lhs) = (ExprInfo invalidType LValue sl, n)
+        | not $ isImplicitCastAllowed lhsType binOpType                    = (ExprInfo invalidType LValue sl, n)
+        | otherwise                                                        = (ExprInfo lhsType LValue sl, AssignmentNode op lhs rhsCast)
+      where
+        convertBinaryOp PlusEq = Addition
+        convertBinaryOp MinusEq = Subtraction
+        convertBinaryOp MulEq = Multiplication
+        convertBinaryOp DivEq = Division
+        convertBinaryOp ModEq = Modulus
+        convertBinaryOp _     = error "Assignment op is not binary"
+        (binOpType, lhsType, rhsType) = binaryTypeResult structs (convertBinaryOp op) (typeOf lhs) (typeOf rhs)
+        rhsCast = castOrInvalid rhs rhsType
+
     -- This is very stupid, I hate throwing context & state into expressions like this, it really shouldn't happen 
     alg (ExprInfo _ _ sl, n@(MemberAccessNode isPtr lhs rhs))
         | typeOf lhs == invalidType             = (ExprInfo invalidType LValue sl, n)
@@ -564,3 +590,82 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         alg (ExprInfo _ _ sl, n@(ArrayIndexNode arr _)) =
             (uncurry3 ExprInfo (combine3 (unaryTypeResult Dereference $ typeOf arr) sl), n)
         alg n = n
+
+type ErrOrType = Either String DataType
+
+findExprError :: Environment -> StructMap -> Expr -> String
+findExprError env structs expr =
+    case foldFix (alg . getCompose) expr of
+        Left msg -> msg
+        Right _  -> error "findExprError called with no error present"
+  where
+    subType t = case t of
+        Left _ -> invalidType
+        Right tp -> tp
+    showSub t = showDt $ subType t
+
+    alg :: (ExprInfo, ExprF ErrOrType) -> ErrOrType
+    alg (info, IdentifierNode name)
+        | dataType info == invalidType = Left $ "Couldn't find identifier named " ++ name
+        | otherwise = Right $ dataType info
+    alg (info, StructMemberNode name)
+        | dataType info == invalidType = Left name
+        | otherwise = Right $ dataType info
+    alg (info, LiteralNode _) = Right $ dataType info
+    alg (info, FunctionCallNode name args)
+        | isLeft argsErr = argsErr
+        | otherwise = case lookupVar name env of
+            Just (FunctionVar rt param)
+                | length param /= length args -> Left $ "Expected " ++ show (length param) ++ " arguments but got " ++ show (length args)
+                | otherwise -> Right rt
+            Nothing -> Left $ "Couldn't find function of name " ++ name
+            _       -> Left $ "Identifier " ++ name ++ " is not a function"
+      where
+        argsErr = fmap (const $ dataType info) (sequence args)
+    alg (info, ArrayIndexNode lErr rErr)
+        | isLeft lErr = lErr
+        | isLeft rErr = rErr
+        | dataType info == invalidType = Left "Can't index a non-pointer type"
+        | otherwise = Right $ dataType info
+    alg (_, ParenthesisNode sub) = sub -- Flatten these
+    alg (info, BinaryOpNode op lErr rErr)
+        | isLeft lErr = lErr
+        | isLeft rErr = rErr
+        | dataType info == invalidType = Left "Do i ever occur? Check me again"
+        | otherwise = Right $ dataType info
+    alg (info, UnaryOpNode op sub)
+        | isLeft sub = sub
+        | dataType info == invalidType = case op of
+            Negate      -> Left $ "Can't negate non-integral or non-float type " ++ showSub sub
+            Not         -> Left $ "Can't apply not to a non-boolean type " ++ showSub sub
+            Reference   -> Left "Can't take the reference of a non-identifier"
+            Dereference -> Left $ "Can't dereference non-pointer type " ++ showSub sub
+        | otherwise = Right $ dataType info
+    alg (info, AssignmentNode op lhs rhs)
+        | isLeft lhs = lhs
+        | isLeft rhs = rhs
+        | dataType info == invalidType = Left "Can't assign to LValue"
+        | otherwise = Right $ dataType info
+    alg (info, MemberAccessNode isPtr lhs rhs)
+        | isLeft lhs = lhs
+        | not isPtr && isPointerType (subType lhs)   = Left $ "Can't do '.' on pointer-type " ++ showSub lhs
+        | isPtr && not (isPointerType (subType lhs)) = Left $ "Can't do '->' on value-type " ++ showSub lhs
+        | not $ M.member (fst (subType lhs)) structs = Left $ "No struct found named " ++ fst (subType lhs)
+        | isLeft rhs = case rhs of
+            Left name
+                -- In the case we get an error from the rhs, it's either the name of the member (no spaces lmao)
+                | ' ' `elem` name -> Left $ "No member " ++ name ++ " of struct " ++ fst (subType lhs)
+                -- Or an error from one of the array indexes/accesses done
+                | otherwise       -> rhs
+        | otherwise = Right $ dataType info
+    alg (info, CastNode castType sub)
+        | isLeft sub = sub
+        | dataType info == invalidType = Left $ "Can not cast from " ++ showSub sub ++ " to " ++ showDt castType
+        | otherwise = Right $ dataType info
+
+-- Error layering:
+-- data ErrorLayer { loc :: SourceLoc, msg :: String }
+-- wrapping "lefts" =
+-- wrapLeft :: ExprInfo -> Either ... -> Either
+-- wrapLeft info wr = wrap the info around wr like, give sl and msg = "In expression"
+-- you can then choose how deep you want the error layer to be w/ a list going left->right from shallow->deep

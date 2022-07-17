@@ -105,25 +105,15 @@ voidType = ("void", [])
 ptrdiffType = longType
 
 -- Checking basic types
-isValueType, isPointerType, isFloatType, isBoolType, isVoidType, isBasePointer :: DataType -> Bool
+isValueType, isPointerType, isArrayType, isFloatType, isBoolType, isVoidType, isBasePointer :: DataType -> Bool
 isValueType (_, ptrList) = null ptrList 
 isPointerType = not . isValueType
+isArrayType (_, ptrList) = not (null ptrList) && (head ptrList /= 0) 
 isFloatType = (==floatType)
 isBoolType = (==boolType)
 isVoidType = (==voidType)
 isBasePointer (_, [_]) = True
 isBasePointer _        = False
-
-datatypeSize :: DataType -> Int
-datatypeSize tp
-    | isPointerType tp = 8
-    | tp == boolType  = 1
-    | tp == charType  = 1
-    | tp == shortType = 2
-    | tp == intType   = 4
-    | tp == longType  = 8
-    | tp == floatType = 8
-    | otherwise       = 0
 
 classifySize :: String -> Int
 classifySize tp
@@ -216,10 +206,14 @@ data Handedness = LValue | RValue deriving (Show, Eq)
 type ExprAnn = Compose ((,) ExprInfo)
 type Expr = Fix (ExprAnn ExprF)
 
+getExprF :: Expr -> ExprF Expr
+getExprF = snd . getCompose . unFix
 annotExpr :: DataType -> Handedness -> SourceLoc -> ExprF Expr -> Expr
 annotExpr tp hd sl = (Fix . Compose) . (,) (ExprInfo tp hd sl)
 annotExprEmpty :: ExprF Expr -> Expr
 annotExprEmpty = annotExpr invalidType LValue (SourceLoc 0 0)
+annotExprLoc :: SourceLoc -> ExprF Expr -> Expr
+annotExprLoc = annotExpr invalidType LValue
 typeOf :: Expr -> DataType
 typeOf = dataType . fst . getCompose . unFix
 handednessOf :: Expr -> Handedness
@@ -270,7 +264,7 @@ type TypeEnv = S.Set String
 type LexerState = ([TokenPos], String, (Int, Int))
 type ParseAction = StateT ParseState (Either FailureInfo)
 type Program = ([FunctionDefinition], [StructDefinition])
-newtype StructDefinition = StructDefinition { getStructDef :: (String, [(DataType, String)]) }
+type StructDefinition = (String, [(DataType, String)])
 
 data SymbolType = FuncSym | TypeSym | VarSym | UnkSym deriving (Show, Eq)
 type SymbolMap = [M.Map String SymbolType]
@@ -306,7 +300,7 @@ raiseFailureLoc :: String -> SourceLoc -> StateT s (Either FailureInfo) a
 raiseFailureLoc msg = uncurry (raiseFailure msg) . (srcBegin &&& srcEnd)
 
 getMemberType :: StructDefinition -> String -> DataType 
-getMemberType (StructDefinition (_, memberList)) name =
+getMemberType (_, memberList) name =
     maybe invalidType fst (L.find ((==name) . snd) memberList)
 
 getIdentifierType :: String -> SymbolMap -> SymbolType
@@ -336,7 +330,6 @@ data DNAOperand
     = Variable Bool DNAVariable
     | MemoryRef Bool DNAVariable Int DNAType
     | Immediate Rational DNAType
-    | StructMemberFixup String DNAType
     | None
     
 data JmpCondition
@@ -360,7 +353,7 @@ data DNAInstruction
     | Mod DNAOperand DNAOperand DNAOperand
     | Cmp DNAOperand DNAOperand
     | Jmp JmpCondition String
-    | Param DNAOperand
+    | Param DNAOperand DNAType
     | Call String DNAOperand
     | ReturnVal DNAOperand
     | ReturnVoid

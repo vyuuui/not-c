@@ -92,7 +92,7 @@ lexStringSingle env str = lexStringSingleHelper env str 0
             | otherwise                = Identifier str
         lexOperator :: String -> Int -> LexerResult
         lexOperator str numParsed
-            | null longestMatch = trace ("operator is " ++ longestMatch) (Invalid str, numParsed, rest)
+            | null longestMatch = (Invalid str, numParsed, rest)
             | otherwise         = (Operator longestMatch, numParsed + length longestMatch, drop (length longestMatch) str)
           where
             checkStop (_, _, [])            = True
