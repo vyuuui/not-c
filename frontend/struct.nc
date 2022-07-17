@@ -1,12 +1,7 @@
-int proof_my_compiler_works(int fac) {
-    long i;
-    long out = 1;
-    for (i = 1; i <= fac; i+=1) {
-        out *= i;
-    }
-    return out;
-}
-
-int main() {
-    return proof_my_compiler_works(10);
+float main() {
+    float test_x;
+    test_x = 5;
+    float pos = (4.0 / 2.0) * test_x + 3;
+    print pos;
+    return pos;
 }

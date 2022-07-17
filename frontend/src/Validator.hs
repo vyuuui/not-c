@@ -222,8 +222,9 @@ validateSyntaxNode node = do
     failCantCastDef t0 t1 =
         raiseFailureLoc ("Cannot cast definition expression from " ++ showDt t0 ++ " to " ++ showDt t1) nodeLoc
     failExprInvalid :: Expr -> GeneratorAction ()
-    failExprInvalid expr =
-        raiseFailureLoc ("Expression typecheck failed. Expression tree:\n---\n" ++ showExprTree expr ++ "---\n") nodeLoc
+    failExprInvalid expr = do
+        exprErr <- findExprError <$> (environment <$> get) <*> (structMap <$> get) <*> pure expr
+        raiseFailureLoc (message exprErr) (location exprErr)
 
     getExprDecltype :: SyntaxNode -> GeneratorAction DataType
     getExprDecltype node = case snd $ getCompose $ unFix node of 
@@ -277,6 +278,10 @@ validateSyntaxNode node = do
         block <- skipBlockAndValidate block
         popEnvironment
         return $ ForNode init condition expr block
+    validateSyntaxNodeF (PrintNode expr) = do
+        expr <- validateSyntaxNode expr
+        getExprDecltype expr
+        return $ PrintNode expr
     validateSyntaxNodeF (IfNode condition block) = do
         condition <- validateSyntaxNode condition
         condType <- getExprDecltype condition
@@ -304,7 +309,7 @@ validateSyntaxNode node = do
         return $ IfElseNode condition block elseBlock
     validateSyntaxNodeF (ReturnNode expr) = do
         expr <- validateSyntaxNode expr
-        exprType <- getExprDecltype expr
+        exprType <- if isEmptyNode expr then return voidType else getExprDecltype expr
         funcNode <- lookupVarFailure "$currentFunction"
         let (FunctionVar funcRetType _) = funcNode
         unless
@@ -360,10 +365,10 @@ binaryTypeResult
     -> DataType
     -> (DataType, DataType, DataType)
 binaryTypeResult structs op lhsType rhsType
-    | lhsType == invalidType   = invalidPair
-    | rhsType == invalidType   = invalidPair
-    | isBaseType lhsType && M.member (fst lhsType) structs = invalidPair
-    | isBaseType rhsType && M.member (fst rhsType) structs = invalidPair
+    | lhsType == invalidType   = invalidResult
+    | rhsType == invalidType   = invalidResult
+    | isBaseType lhsType && M.member (fst lhsType) structs = invalidResult
+    | isBaseType rhsType && M.member (fst rhsType) structs = invalidResult
     | op == Addition           = decideAddition
     | op == Multiplication     = decideMultiplication
     | op == Subtraction        = decideSubtraction
@@ -377,9 +382,9 @@ binaryTypeResult structs op lhsType rhsType
     | op == LessThanOrEqual    = decideRelCompare
     | op == Or                 = decideLogical
     | op == And                = decideLogical
-    | otherwise                = invalidPair
+    | otherwise                = invalidResult
   where
-    invalidPair = dupe3 invalidType
+    invalidResult = (invalidType, lhsType, rhsType)
     typeFormMatches tp1 tp2 = fst tp1 == fst tp2 && length (snd tp1) == length (snd tp2)
     decideCompare :: (DataType, DataType, DataType)
     decideCompare
@@ -387,19 +392,19 @@ binaryTypeResult structs op lhsType rhsType
         | isIntegralType lhsType && isIntegralType rhsType = dupe2nd boolType $ largestType lhsType rhsType
         | isIntegralType lhsType && isFloatType rhsType    = (boolType, rhsType, rhsType)
         | isFloatType lhsType && isIntegralType rhsType    = (boolType, lhsType, lhsType)
-        | otherwise                                        = invalidPair
+        | otherwise                                        = invalidResult
     decideRelCompare :: (DataType, DataType, DataType)
     decideRelCompare
-        | isBoolType lhsType || isBoolType rhsType = invalidPair
+        | isBoolType lhsType || isBoolType rhsType = invalidResult
         | otherwise                                = decideCompare
     decideLogical :: (DataType, DataType, DataType)
     decideLogical
         | lhsType == boolType && rhsType == boolType = dupe3 boolType
-        | otherwise                                  = invalidPair
+        | otherwise                                  = invalidResult
     decideModulus :: (DataType, DataType, DataType)
     decideModulus
         | isIntegralType lhsType && isIntegralType rhsType = dupe3 $ largestType lhsType rhsType
-        | otherwise                                        = invalidPair
+        | otherwise                                        = invalidResult
     decideAddition :: (DataType, DataType, DataType)
     decideAddition
     -- ptr + integral (ptr)
@@ -413,18 +418,18 @@ binaryTypeResult structs op lhsType rhsType
     -- float + float (float)
         | isFloatType lhsType && isFloatType rhsType       = dupe3 floatType
     -- anything else = invalid
-        | otherwise = invalidPair
+        | otherwise = invalidResult
     decideMultiplication :: (DataType, DataType, DataType)
     decideMultiplication
     -- either are pointers -> not allowed
-        | isPointerType lhsType || isPointerType rhsType = invalidPair
+        | isPointerType lhsType || isPointerType rhsType = invalidResult
         | otherwise = decideAddition
     decideSubtraction :: (DataType, DataType, DataType)
     decideSubtraction
     -- ptr - ptr (long)
         | isPointerType lhsType && isPointerType rhsType &&
           typeFormMatches lhsType rhsType = (ptrdiffType, lhsType, rhsType)
-        | isPointerType rhsType && isBaseType rhsType = invalidPair
+        | isPointerType rhsType && isBaseType rhsType = invalidResult
         | otherwise = decideAddition
     decideDivision :: (DataType, DataType, DataType)
     decideDivision = decideMultiplication
@@ -506,20 +511,19 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
             | length args /= length params =
                 (annot invalidType, FunctionCallNode name args)
             | any ((==invalidType) . typeOf) castedArgs =
-                (annot invalidType, FunctionCallNode name args)
+                (annot invalidType, FunctionCallNode name castedArgs)
             | otherwise = (annot rtype, FunctionCallNode name castedArgs)
           where
             annot tp = ExprInfo tp RValue sl
             castedArgs = zipWith castOrInvalid args (map fst params)
-
     alg (ExprInfo _ _ sl, n@(ArrayIndexNode arr idx))
         | not $ isIntegralType $ typeOf idx = (ExprInfo invalidType RValue sl, n)
         | otherwise =
             (uncurry3 ExprInfo (combine3 (unaryTypeResult Dereference $ typeOf arr) sl), n)
     alg (ExprInfo _ _ sl, n@(ParenthesisNode sub)) = (ExprInfo (typeOf sub) (handednessOf sub) sl, n)
     alg (ExprInfo _ _ sl, n@(BinaryOpNode op lhs rhs))
-        | typeOf lhsCast == invalidType = (ExprInfo invalidType RValue sl, n)
-        | typeOf rhsCast == invalidType = (ExprInfo invalidType RValue sl, n)
+        | typeOf lhsCast == invalidType = (ExprInfo invalidType RValue sl, BinaryOpNode op lhsCast rhsCast)
+        | typeOf rhsCast == invalidType = (ExprInfo invalidType RValue sl, BinaryOpNode op lhsCast rhsCast)
         | otherwise                     = (ExprInfo binOpType RValue sl, BinaryOpNode op lhsCast rhsCast)
       where
         (binOpType, lhsType, rhsType) = binaryTypeResult structs op (typeOf lhs) (typeOf rhs)
@@ -528,22 +532,23 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
     alg (ExprInfo _ _ sl, n@(UnaryOpNode op sub))
         | typeOf sub == invalidType            = (ExprInfo invalidType RValue sl, n)
         | op == Reference && not (isIdVar sub) = (ExprInfo invalidType RValue sl, n)
-        | otherwise                            = (ExprInfo uType uHand sl, UnaryOpNode op sub)
+        | otherwise                            = (ExprInfo uType uHand sl, n)
       where
         (uType, uHand) = unaryTypeResult op $ typeOf sub
     alg (ExprInfo _ _ sl, n@(AssignmentNode NoOp lhs rhs)) -- TODO: this should probably be broken into a (x) = x op y | op /= NoOp
         | typeOf lhs == invalidType          = (ExprInfo invalidType LValue sl, n)
-        | typeOf newRhs == invalidType       = (ExprInfo invalidType LValue sl, n)
-        | handednessOf lhs /= LValue         = (ExprInfo invalidType LValue sl, n)
+        | typeOf newRhs == invalidType       = (ExprInfo invalidType LValue sl, AssignmentNode NoOp lhs newRhs)
+        | handednessOf lhs /= LValue         = (ExprInfo invalidType LValue sl, AssignmentNode NoOp lhs newRhs)
         | otherwise                          = (ExprInfo (typeOf lhs) LValue sl, AssignmentNode NoOp lhs newRhs)
       where
         newRhs = castOrInvalid rhs $ typeOf lhs
-    alg (ExprInfo _ _ sl, n@(AssignmentNode op lhs rhs)) -- TODO: this should probably be broken into a (x) = x op y | op /= NoOp
-        | lhsType == invalidType                                           = (ExprInfo invalidType LValue sl, n)
-        | rhsType == invalidType                                           = (ExprInfo invalidType LValue sl, n)
+    alg (ExprInfo _ _ sl, n@(AssignmentNode op lhs rhs))
+        | typeOf lhs == invalidType                                        = (ExprInfo invalidType LValue sl, n)
+        | typeOf rhs == invalidType                                        = (ExprInfo invalidType LValue sl, n)
         | handednessOf lhs /= LValue                                       = (ExprInfo invalidType LValue sl, n)
-        | not $ isPrimitiveType (typeOf lhs) || isPointerType (typeOf lhs) = (ExprInfo invalidType LValue sl, n)
-        | not $ isImplicitCastAllowed lhsType binOpType                    = (ExprInfo invalidType LValue sl, n)
+        | not (isPrimitiveType (typeOf lhs) || isPointerType (typeOf lhs)) = (ExprInfo invalidType LValue sl, n)
+        | rhsType == invalidType                                           = (ExprInfo invalidType LValue sl, AssignmentNode op lhs rhsCast)
+        | not (isImplicitCastAllowed lhsType binOpType)                    = (ExprInfo invalidType LValue sl, AssignmentNode op lhs rhsCast)
         | otherwise                                                        = (ExprInfo lhsType LValue sl, AssignmentNode op lhs rhsCast)
       where
         convertBinaryOp PlusEq = Addition
@@ -563,13 +568,9 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         | otherwise                             = (ExprInfo invalidType LValue sl, n)
       where
         memberAccessHelper :: Maybe StructDefinition -> (ExprInfo, ExprF Expr)
-        memberAccessHelper (Just def) 
-            | rhsFixedType == invalidType = (ExprInfo invalidType LValue sl, n)
-            | otherwise                   = (ExprInfo rhsFixedType LValue sl, MemberAccessNode isPtr lhs rhsFixed)
+        memberAccessHelper (Just def) = (ExprInfo (typeOf rhsFixed) LValue sl, MemberAccessNode isPtr lhs rhsFixed)
           where
             rhsFixed = computeMemberAccess def rhs
-            rhsFixedType = typeOf rhsFixed
-            newN = MemberAccessNode 
         memberAccessHelper _          = (ExprInfo invalidType LValue sl, n)
         maybeStructDef :: Maybe StructDefinition
         maybeStructDef = M.lookup (fst $ typeOf lhs) structs
@@ -587,13 +588,20 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         alg :: (ExprInfo, ExprF Expr) -> (ExprInfo, ExprF Expr)
         alg (ExprInfo _ _ sl, n@(StructMemberNode name)) =
             (ExprInfo (getMemberType struct name) LValue sl, n)
-        alg (ExprInfo _ _ sl, n@(ArrayIndexNode arr _)) =
-            (uncurry3 ExprInfo (combine3 (unaryTypeResult Dereference $ typeOf arr) sl), n)
+        alg (ExprInfo _ _ sl, n@(ArrayIndexNode arr idx))
+            | not $ isIntegralType $ typeOf idx = (ExprInfo invalidType RValue sl, n)
+            | otherwise = (uncurry3 ExprInfo (combine3 (unaryTypeResult Dereference $ typeOf arr) sl), n)
         alg n = n
 
-type ErrOrType = Either String DataType
+data ExprError = ExprError
+    { location :: SourceLoc
+    , message :: String
+    , nodeType :: ExprF ()
+    }
 
-findExprError :: Environment -> StructMap -> Expr -> String
+type ErrOrType = Either ExprError ExprInfo
+
+findExprError :: Environment -> StructMap -> Expr -> ExprError
 findExprError env structs expr =
     case foldFix (alg . getCompose) expr of
         Left msg -> msg
@@ -601,67 +609,81 @@ findExprError env structs expr =
   where
     subType t = case t of
         Left _ -> invalidType
-        Right tp -> tp
+        Right info -> dataType info
     showSub t = showDt $ subType t
 
+    makeErr :: (ExprInfo, ExprF a) -> String -> ErrOrType
+    makeErr (info, node) msg = Left $ ExprError { location = sourceLoc info, message = msg, nodeType = void node }
+
     alg :: (ExprInfo, ExprF ErrOrType) -> ErrOrType
-    alg (info, IdentifierNode name)
-        | dataType info == invalidType = Left $ "Couldn't find identifier named " ++ name
-        | otherwise = Right $ dataType info
-    alg (info, StructMemberNode name)
-        | dataType info == invalidType = Left name
-        | otherwise = Right $ dataType info
-    alg (info, LiteralNode _) = Right $ dataType info
-    alg (info, FunctionCallNode name args)
+    alg n@(info, IdentifierNode name)
+        | dataType info == invalidType = makeErr n $ "Couldn't find identifier named " ++ name
+        | otherwise = Right info
+    alg n@(info, StructMemberNode name)
+        | dataType info == invalidType = makeErr n ""
+        | otherwise = Right info
+    alg n@(info, LiteralNode _) = Right info
+    alg n@(info, FunctionCallNode name args)
         | isLeft argsErr = argsErr
         | otherwise = case lookupVar name env of
             Just (FunctionVar rt param)
-                | length param /= length args -> Left $ "Expected " ++ show (length param) ++ " arguments but got " ++ show (length args)
-                | otherwise -> Right rt
-            Nothing -> Left $ "Couldn't find function of name " ++ name
-            _       -> Left $ "Identifier " ++ name ++ " is not a function"
+                | length param /= length args -> makeErr n $ "Expected " ++ show (length param) ++ " arguments but got " ++ show (length args)
+                | otherwise -> Right info
+            Nothing -> makeErr n $ "Couldn't find function of name " ++ name
+            _       -> makeErr n $ "Identifier " ++ name ++ " is not a function"
       where
-        argsErr = fmap (const $ dataType info) (sequence args)
-    alg (info, ArrayIndexNode lErr rErr)
+        argsErr = fmap (const info) (sequence args)
+    alg n@(info, ArrayIndexNode arr idx)
+        | isLeft arr = arr
+        | isLeft idx = idx
+        | not $ isIntegralType $ subType idx = makeErr n $ "Can't index array with non-integral type " ++ showSub idx
+        | dataType info == invalidType = makeErr n $ "Can't index a non-pointer type " ++ showSub arr
+        | otherwise = Right info
+    alg n@(_, ParenthesisNode sub) = sub
+    alg n@(info, BinaryOpNode op lErr rErr)
         | isLeft lErr = lErr
         | isLeft rErr = rErr
-        | dataType info == invalidType = Left "Can't index a non-pointer type"
-        | otherwise = Right $ dataType info
-    alg (_, ParenthesisNode sub) = sub -- Flatten these
-    alg (info, BinaryOpNode op lErr rErr)
-        | isLeft lErr = lErr
-        | isLeft rErr = rErr
-        | dataType info == invalidType = Left "Do i ever occur? Check me again"
-        | otherwise = Right $ dataType info
-    alg (info, UnaryOpNode op sub)
+        | dataType info == invalidType =
+            makeErr n $ "Can not perform operation " ++ show op ++ " on types " ++ showSub lErr ++ " and " ++ showSub rErr
+        | otherwise = Right info
+    alg n@(info, UnaryOpNode op sub)
         | isLeft sub = sub
         | dataType info == invalidType = case op of
-            Negate      -> Left $ "Can't negate non-integral or non-float type " ++ showSub sub
-            Not         -> Left $ "Can't apply not to a non-boolean type " ++ showSub sub
-            Reference   -> Left "Can't take the reference of a non-identifier"
-            Dereference -> Left $ "Can't dereference non-pointer type " ++ showSub sub
-        | otherwise = Right $ dataType info
-    alg (info, AssignmentNode op lhs rhs)
+            Negate      -> makeErr n $ "Can't negate non-integral or non-float type " ++ showSub sub
+            Not         -> makeErr n $ "Can't apply not to non-boolean type " ++ showSub sub
+            Reference   -> makeErr n "Can't take the reference of non-identifier"
+            Dereference -> makeErr n $ "Can't dereference non-pointer type " ++ showSub sub
+        | otherwise = Right info
+    alg n@(info, AssignmentNode op lhs rhs)
         | isLeft lhs = lhs
         | isLeft rhs = rhs
-        | dataType info == invalidType = Left "Can't assign to LValue"
-        | otherwise = Right $ dataType info
-    alg (info, MemberAccessNode isPtr lhs rhs)
+        | dataType info == invalidType = (assignErr <$> lhs <*> rhs) >>= makeErr n
+        | otherwise = Right info
+      where
+        assignErr :: ExprInfo -> ExprInfo -> String
+        assignErr (ExprInfo ldt lhd _) (ExprInfo rdt _ _)
+            | lhd == RValue = "Can't do assignment to r-value"
+            | otherwise = case op of
+                NoOp -> error "Unexpected error in assignment expression"
+                _
+                    | not (isPrimitiveType ldt || isPointerType ldt) ->
+                        "Can't do assignment operation " ++ show op ++ " to a struct-type " ++ showDt ldt
+                    | otherwise ->
+                        "Can't do assignment operation " ++ show op ++ " over types " ++ showDt ldt ++ " and " ++ showDt rdt
+    alg n@(info, MemberAccessNode isPtr lhs rhs)
         | isLeft lhs = lhs
-        | not isPtr && isPointerType (subType lhs)   = Left $ "Can't do '.' on pointer-type " ++ showSub lhs
-        | isPtr && not (isPointerType (subType lhs)) = Left $ "Can't do '->' on value-type " ++ showSub lhs
-        | not $ M.member (fst (subType lhs)) structs = Left $ "No struct found named " ++ fst (subType lhs)
+        | not isPtr && isPointerType (subType lhs)   = makeErr n $ "Can't do '.' on pointer-type " ++ showSub lhs
+        | isPtr && not (isPointerType (subType lhs)) = makeErr n $ "Can't do '->' on value-type " ++ showSub lhs
+        | not $ M.member (fst (subType lhs)) structs = makeErr n $ "No struct found named " ++ fst (subType lhs)
         | isLeft rhs = case rhs of
-            Left name
-                -- In the case we get an error from the rhs, it's either the name of the member (no spaces lmao)
-                | ' ' `elem` name -> Left $ "No member " ++ name ++ " of struct " ++ fst (subType lhs)
-                -- Or an error from one of the array indexes/accesses done
-                | otherwise       -> rhs
-        | otherwise = Right $ dataType info
-    alg (info, CastNode castType sub)
+            Left errInfo -> case nodeType errInfo of
+                StructMemberNode name -> makeErr n $ "No member " ++ name ++ " of struct " ++ fst (subType lhs)
+                _                     -> rhs
+        | otherwise = Right info
+    alg n@(info, CastNode castType sub)
         | isLeft sub = sub
-        | dataType info == invalidType = Left $ "Can not cast from " ++ showSub sub ++ " to " ++ showDt castType
-        | otherwise = Right $ dataType info
+        | dataType info == invalidType = makeErr n $ "Can not cast from " ++ showSub sub ++ " to " ++ showDt castType
+        | otherwise = Right info
 
 -- Error layering:
 -- data ErrorLayer { loc :: SourceLoc, msg :: String }

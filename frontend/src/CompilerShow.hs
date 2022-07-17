@@ -119,6 +119,10 @@ showSyntaxTree = unlines . showTreeR
                 exprLns = rewriteHead "└─" $ map ("  "++) $ showTreeR expr
             in  header ++ exprLns
         (annot, ExprNode e) -> showExprTreeLn e
+        (annot, PrintNode e) ->
+            let header = ["Print : " ++ show annot]
+                subLns = rewriteHead "└─" $ map ("  "++) $ showTreeR e
+            in  header ++ subLns
 
 showDeclList :: String -> DeclList -> String
 showDeclList inter = L.intercalate inter . map (\ (t, n) -> showDt t ++ (' ':n))
@@ -174,7 +178,7 @@ instance Show DNAOperand where
             | isRef = '&':show var
             | otherwise = show var
     show (Immediate val tp) = show (round val) ++ "::" ++ show tp
-    show _ = "(Invalid Operand)"
+    show None = "$nil"
 
 instance Show JmpCondition where
     show Always = "mp"
@@ -201,7 +205,7 @@ instance Show DNAInstruction where
     show (Sub dst src1 src2) = "sub" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
     show (Mul dst src1 src2) = "mul" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
     show (Div dst src1 src2) = "div" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
-    show (Mod dst src1 src2) = "mov" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+    show (Mod dst src1 src2) = "mod" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
     show (Cmp lhs rhs) = "cmp" ++ (' ':show lhs) ++ (' ':show rhs)
     show (Jmp cond lbl) = "j" ++ show cond ++ (' ':lbl)
     show (Param op tp) = "param" ++ (' ':show op) ++ (' ':show tp)
@@ -212,6 +216,7 @@ instance Show DNAInstruction where
     show (IntToFloat op1 op2) = "inttofloat" ++ (' ':show op1) ++ (' ':show op2)
     show (FloatToInt op1 op2) = "floattoint" ++ (' ':show op1) ++ (' ':show op2)
     show (Label lbl) = ".label" ++ (' ':lbl)
+    show (Print op) = "print" ++ (' ':show op)
 
 showFunction :: DNAFunctionDefinition -> String
 showFunction (name, vars, body) =

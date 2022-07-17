@@ -285,11 +285,12 @@ generateIr = generateIrHelper . snd . getCompose . unFix
         tryFreeOperand resultOp
         return newBlock
     generateIrHelper (ReturnNode expr) = do
-        (exprBlock, resultOp) <- generateIrSyntaxExpr expr
-        tryFreeOperand resultOp
         if isEmptyNode expr
-            then return [ReturnVoid]
-            else return $ exprBlock ++ [ReturnVal resultOp]
+          then return [ReturnVoid]
+          else do
+            (exprBlock, resultOp) <- generateIrSyntaxExpr expr
+            tryFreeOperand resultOp
+            return $ exprBlock ++ [ReturnVal resultOp]
     generateIrHelper EmptyNode = return []
     generateIrHelper (SeqNode first second) = do
         statement <- generateIr first
@@ -376,6 +377,10 @@ generateIr = generateIrHelper . snd . getCompose . unFix
         (block, result) <- generateIrExpr expr
         tryFreeOperand result
         return block
+    generateIrHelper (PrintNode expr) = do
+        (exprBlock, resultOp) <- generateIrSyntaxExpr expr
+        tryFreeOperand resultOp
+        return $ exprBlock ++ [Print resultOp]
 
 generateIrSkipBlock :: SyntaxNode -> GeneratorAction DNABlock
 generateIrSkipBlock node = case snd $ getCompose $ unFix node of
@@ -669,8 +674,9 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
         instList <- mapM generateIrExpr args
         let paramInsts = zipWith ($) (map (Param . snd) instList) (map (exprToDNA . typeOf) args)
         let argBlocks  = concatMap fst instList
-        returnVal <- getTempVar $ exprToDNA exprType
-        let returnOp = opVar returnVal
+        returnOp <- if exprType == voidType
+                      then return None
+                      else opVar <$> getTempVar (exprToDNA exprType)
         let newBlock = (argBlocks
                      ++ paramInsts
                      ++ [Call name returnOp], returnOp)

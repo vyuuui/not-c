@@ -18,7 +18,8 @@ control = S.fromList ["if", "else", "for", "while", "return", "break", "continue
 punctuation :: S.Set String
 punctuation = S.fromList ["(", ")", "{", "}", ",", ";", "[", "]"]
 keyword :: S.Set String
-keyword = S.fromList ["struct"]
+keyword = S.fromList ["struct", "print"]
+
 
 allOperatorChars :: S.Set Char
 allOperatorChars = S.foldr (S.union . S.fromList) S.empty operators
@@ -63,7 +64,7 @@ lexStringSingle env str = lexStringSingleHelper env str 0
                                   in  (classifyLetterToken (h:token) env, totalParsed, rest)
         | C.isSpace h           = uncurry (lexStringSingleHelper env) $ second (+numParsed) (dropAndCount C.isSpace (h:t))
         | h == '"'              = lexStringConstant t numParsed
-        | otherwise             = (Invalid [h], numParsed, t)
+        | otherwise             = (Invalid [h], numParsed + 1, t)
       where
         lexStringConstant :: String -> Int -> LexerResult
         lexStringConstant str numParsed = tryAppendStr $ until endingQuote buildString ("", numParsed, str)

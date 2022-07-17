@@ -2,7 +2,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 module CompilerShared where
 
-import Control.Arrow (arr, first, (>>>), (&&&))
+import Control.Arrow (arr, first, (>>>), (&&&), ArrowChoice)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.State.Lazy (StateT)
 import Data.Fix (Fix(..), unFix)
@@ -236,6 +236,7 @@ data SyntaxNodeF r
     | ContinueNode
     | BreakNode
     | BlockNode r
+    | PrintNode r
     -- Decl
     | DeclarationNode DataType String
     | DefinitionNode DataType String r
@@ -259,7 +260,7 @@ isEmptyNode nod = case snd $ getCompose $ unFix nod of
 
 ---------------------------
 -- Parser state information
-data FailureInfo = FailureInfo { failReason :: String, failRegion :: (Int, Int) }
+data FailureInfo = FailureInfo { failReason :: String, failRegion :: (Int, Int), failLocation :: Int }
 type TypeEnv = S.Set String
 type LexerState = ([TokenPos], String, (Int, Int))
 type ParseAction = StateT ParseState (Either FailureInfo)
@@ -295,9 +296,11 @@ initialState :: String -> ParseState
 initialState progStr = ParseState ([], progStr, (0, 0)) baseTypes [] [] [M.fromList (map (, TypeSym) $ S.toList baseTypes)] 0
 
 raiseFailure :: String -> Int -> Int -> StateT s (Either FailureInfo) a
-raiseFailure msg begin end = lift (Left (FailureInfo msg (begin, end)))
+raiseFailure msg begin end = lift (Left (FailureInfo msg (begin, end) end))
 raiseFailureLoc :: String -> SourceLoc -> StateT s (Either FailureInfo) a
 raiseFailureLoc msg = uncurry (raiseFailure msg) . (srcBegin &&& srcEnd)
+raiseFailurePrecise :: String -> Int -> Int -> Int -> StateT s (Either FailureInfo) a
+raiseFailurePrecise msg begin end opt = lift (Left (FailureInfo msg (begin, end) opt))
 
 getMemberType :: StructDefinition -> String -> DataType 
 getMemberType (_, memberList) name =
@@ -361,3 +364,4 @@ data DNAInstruction
     | IntToFloat DNAOperand DNAOperand
     | FloatToInt DNAOperand DNAOperand
     | Label String
+    | Print DNAOperand

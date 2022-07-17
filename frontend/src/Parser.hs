@@ -17,7 +17,7 @@ import qualified Data.Set as S
 
 -- Raise a failure from the current node's start lex position to the last lexed position
 raiseFailureHere :: String -> ParseAction a
-raiseFailureHere why = join $ raiseFailure why <$> (currentNodeLexStart <$> get) <*> getPrevLexPosition
+raiseFailureHere why = join $ raiseFailurePrecise why <$> (currentNodeLexStart <$> get) <*> getPrevLexPosition <*> getLexPosition
 
 getTypeEnv :: ParseAction TypeEnv
 getTypeEnv = typeEnv <$> get
@@ -161,7 +161,7 @@ parseTopLevel = do
     case token of 
         Keyword "struct" -> parseAndInsertStruct
         Identifier _ -> parseAndInsertFunction
-        _ -> raiseFailureHere $ "Unexpected top level token " ++ show token
+        _ -> eatToken >> raiseFailureHere ("Unexpected top level token " ++ show token)
   where
     parseAndInsertFunction :: ParseAction ()
     parseAndInsertFunction = do
@@ -170,7 +170,11 @@ parseTopLevel = do
         put $ ParseState lexer env (funcs ++ [func]) structs syms lp
     parseAndInsertStruct :: ParseAction ()
     parseAndInsertStruct = do
+        lp <- getLexPosition
+        setCurrentLexStart lp
         struct@(name, _) <- parseStruct
+        lp <- getLexPosition
+        setCurrentLexStart lp
         ParseState lexer env funcs structs syms lp <- get
         put $ ParseState lexer (S.insert name env) funcs (structs ++ [struct]) syms lp
 
@@ -261,7 +265,7 @@ isTypeName :: SymbolMap -> Token -> Bool
 isTypeName smap (Identifier id) = getIdentifierType id smap == TypeSym
 isTypeName _ _                  = False
 -- For use to determine statement option, based on the START list for each
-isBlock, isExpression, isLvalue, isConditional, isWhileLoop, isForLoop, isReturn, isEmpty, isContinue, isBreak :: Token -> Bool
+isBlock, isExpression, isLvalue, isConditional, isWhileLoop, isForLoop, isReturn, isEmpty, isContinue, isBreak, isPrint :: Token -> Bool
 isBlock = punctuationMatches "{"
 isExpression tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(",
                                 operatorMatches "!", operatorMatches "&", operatorMatches "*",
@@ -274,6 +278,7 @@ isReturn = controlMatches "return"
 isEmpty = punctuationMatches ";"
 isContinue = controlMatches "continue"
 isBreak = controlMatches "break"
+isPrint = keywordMatches "print"
 
 parseStatement :: ParseAction (SyntaxNodeF SyntaxNode)
 parseStatement = do
@@ -309,6 +314,11 @@ parseStatement = do
             eatControl "break"
             eatPunctuation ";"
             return BreakNode
+        | isPrint lookahead       = do
+            eatKeyword "print"
+            expressionNode <- doAnnotateSyntax parseWrapExpression
+            eatPunctuation ";"
+            return $ PrintNode expressionNode
         | otherwise               = raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " when parsing statement"
 
 doAnnotateSyntax :: ParseAction (SyntaxNodeF SyntaxNode) -> ParseAction SyntaxNode
@@ -406,8 +416,10 @@ parseDeclaration = do
 parseReturn :: ParseAction (SyntaxNodeF SyntaxNode)
 parseReturn = do
     eatControl "return"
-    expressionNode <- doAnnotateSyntax parseWrapExpression
-    return $ ReturnNode expressionNode
+    lookahead <- peekToken
+    if punctuationMatches ";" lookahead
+      then return $ ReturnNode $ annotSyntaxEmpty EmptyNode
+      else ReturnNode <$> doAnnotateSyntax parseWrapExpression
 
 parseWrapExpression :: ParseAction (SyntaxNodeF SyntaxNode)
 parseWrapExpression = ExprNode <$> doAnnotateExpr parseExpression
@@ -544,15 +556,20 @@ parseIndirection = do
     tryParseArray :: Expr -> ParseAction Expr
     tryParseArray node = do
         arrayIdxs <- whileM (punctuationMatches "[" <$> peekToken) parseArrayIndex 
-        let rootNode = L.foldl' (\a x -> annotExprLoc (getBounds a x) (ArrayIndexNode a x)) node arrayIdxs
+        let rootNode = L.foldl' foldArrayIndex node arrayIdxs
         return rootNode
       where
-        parseArrayIndex :: ParseAction Expr
+        parseArrayIndex :: ParseAction (Expr, Int)
         parseArrayIndex = do
             eatPunctuation "["
             arrayIdx <- doAnnotateExpr parseExpression
             eatPunctuation "]"
-            return arrayIdx
+            arrEndLoc <- getLexPosition
+            return (arrayIdx, arrEndLoc)
+        foldArrayIndex :: Expr -> (Expr, Int) -> Expr
+        foldArrayIndex acc (rhs, rhsEndLoc) = annotExprLoc location (ArrayIndexNode acc rhs)
+          where
+            location = SourceLoc (srcBegin $ sourceLocOf acc) rhsEndLoc
     tryParseMemberAccess :: Expr -> ParseAction (ExprF Expr)
     tryParseMemberAccess node = do
         memberAccesses <- whileM (continueParsingMembers <$> peekToken) parseMemberAccess 
@@ -633,7 +650,7 @@ parseArraySpec = do
                 eatPunctuation "]"
                 when (v <= 0) (raiseFailureHere "Array sizes must be greater than 0")
                 return (fromIntegral v)
-            _             -> raiseFailureHere "Non-integer type used in array index"
+            _             -> raiseFailureHere "Non-constant/integral size used in array declaration"
 
 parseType :: ParseAction DataType
 parseType = do
@@ -641,7 +658,7 @@ parseType = do
     ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken $> 0)
     return (typeName, ptrLevels)
   
-
+-- print x;
 {-
 prog = toplevel
 toplevel = function | structdecl
@@ -650,7 +667,8 @@ structdecl = 'struct' identifier '{' member* '}'
 member = type identifier arrayspec ';'
 paramlist = type identifier (',' type identifier)* | ε
 block = '{' stmt* '}'
-stmt = declaration ';' | block | expression ';' | conditional | forloop | whileloop | ret ';' | 'continue' ';' | 'break' ';'
+stmt = declaration ';' | block | expression ';' | conditional |
+       forloop | whileloop | ret ';' | 'continue' ';' | 'break' ';' | print expression ';'
 declaration = type identifier arrayspec optassign
 optassign = '=' expression | ε
 whileloop = 'while' '(' expression ')' block

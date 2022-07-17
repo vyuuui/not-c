@@ -784,7 +784,7 @@ public:
         auto dest = operands[0];
         switch (op_cast) {
             case BaseType::Float: {
-                float val = dest->get<float>();
+                float val = dest->get<double>();
                 ctx.stack.push_stack_var(&val, sizeof(val));
                 break;
             }
@@ -940,16 +940,16 @@ public:
             case BaseType::Float:
                 throw std::runtime_error("FloatToIntInstruction dest was of type float");
             case BaseType::Int64:
-                dest->set<int64_t>(src->get<float>());
+                dest->set<int64_t>(src->get<double>());
                 break;
             case BaseType::Int32:
-                dest->set<int32_t>(src->get<float>());
+                dest->set<int32_t>(src->get<double>());
                 break;
             case BaseType::Int16:
-                dest->set<int16_t>(src->get<float>());
+                dest->set<int16_t>(src->get<double>());
                 break;
             case BaseType::Int8:
-                dest->set<int8_t>(src->get<float>());
+                dest->set<int8_t>(src->get<double>());
                 break;
             default:
                 throw std::runtime_error("Unexpected cast_type in floattoint");
@@ -967,7 +967,7 @@ public:
         auto src = operands[0];
         switch (src->get_type()) {
             case BaseType::Float:
-                std::cout << src->get<float>() << std::endl;
+                std::cout << src->get<double>() << std::endl;
                 break;
             case BaseType::Int64:
                 std::cout << src->get<int64_t>() << std::endl;
@@ -1061,7 +1061,7 @@ Operand* parse_srcop(std::string& op, SubroutineInfo const& current_sub) {
             }
             ret = new ImmediateOperand(base_type, &val);
         } else if (is_float(base_type)) {
-            std::regex imm_val_re("([+-]?)(\\d+(?:\\.\\d*))\\s*$");
+            std::regex imm_val_re("([+-]?)(\\d+(?:\\.\\d*)?)\\s*$");
             if (!std::regex_match(constant_str, matches, imm_val_re)) {
                 return nullptr;
             }
@@ -1178,8 +1178,15 @@ Instruction* parse_jmp(std::string const& args, JmpCondition condition, Subrouti
 Instruction* parse_call(std::string const& args, SubroutineInfo const& current_sub) {
     std::string op = args;
     Operand* label = parse_label(op);
+    if (label == nullptr) {
+        return nullptr;
+    }
     Operand* dest = parse_destop(op, current_sub);
-    if (label == nullptr || dest == nullptr) {
+    if (dest == nullptr) {
+        std::regex empty_re("\\$nil\\s*$");
+        if (std::regex_match(op, empty_re)) {
+            return new CallInstruction({label});
+        }
         return nullptr;
     }
     return new CallInstruction({label, dest});

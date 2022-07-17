@@ -1,15 +1,18 @@
 .sub main
-local test int32 3
-local test2 int32 2
-local fe int64
-local fe_ptr int64
+local _pos float
+local _test_x float
+temp t0 float
+temp t1 float
+temp t2 float
 .endframe
 .label main
-mov [&test + 0]::int32 20::int32
-mov [&test + 4]::int32 21::int32
-mov [&test + 8]::int32 22::int32
-add fe &test 4::int32
-mov fe_ptr &fe
-arraycopy &test2 fe 8
-return [&test2 + 4]::int32
-.endsub 
+inttofloat t0 5::int64
+mov _test_x t0
+div t0 4::float 2::float
+mul t1 t0 _test_x
+inttofloat t0 3::int64
+add t2 t1 t0
+mov _pos t2
+print _pos
+return _pos
+.endsub
