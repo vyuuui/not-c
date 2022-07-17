@@ -40,10 +40,12 @@ seqTrip (mFirst, mSecond, mThird) = (,,) <$> mFirst <*> mSecond <*> mThird
 ---------
 -- Tokens
 data ConstantType
-    = IntConstant Int
+    = CharConstant Char
+    | IntConstant Int
     | FloatConstant Float
     | BoolConstant Bool
     | StringConstant String
+    | NullConstant
     deriving (Show, Eq)
 
 data Token
@@ -54,8 +56,14 @@ data Token
     | Punctuation String
     | Keyword String
     | Eof
-    | Invalid String
+    | Invalid String InvalidReason
     deriving (Eq)
+
+data InvalidReason
+    = UntermString
+    | UnknownChar
+    | BadOperator
+    | BadCharStr deriving (Eq, Show)
 
 type TokenPos = (Token, Int)
 
@@ -72,8 +80,8 @@ isPunctuation (Punctuation _) = True
 isPunctuation _               = False
 isEof Eof = True
 isEof _   = False
-isInvalid (Invalid _) = True
-isInvalid _           = False
+isInvalid (Invalid _ _) = True
+isInvalid _             = False
 isKeyword (Keyword _) = True
 isKeyword _           = False
 
@@ -93,8 +101,9 @@ type DataType = (String, [Int])
 type DeclList = [(DataType, String)]
 
 -- DataType utilities
-invalidType, boolType, charType, shortType, intType, longType, floatType, voidType, ptrdiffType :: DataType
+invalidType, nullType, boolType, charType, shortType, intType, longType, floatType, voidType, ptrdiffType :: DataType
 invalidType = ("$", [])
+nullType = ("no", [0])
 boolType = ("bool", [])
 charType = ("char", [])
 shortType = ("short", [])
@@ -167,6 +176,7 @@ data ExprF r
     = IdentifierNode String
     | StructMemberNode String  -- To differentiate between ids and structmems sans context
     | LiteralNode ConstantType
+    | ArrayLiteralNode [r]
     | FunctionCallNode String [r]
     | ArrayIndexNode r r
     | ParenthesisNode r
@@ -257,7 +267,6 @@ data SyntaxNodeF r
     | PrintNode r
     -- Decl
     | DeclarationNode DataType String
-    | DefinitionNode DataType String r
     -- Breakout to expressions
     | ExprNode Expr
     deriving (Functor)
@@ -351,6 +360,7 @@ data DNAOperand
     = Variable Bool DNAVariable
     | MemoryRef Bool DNAVariable Int DNAType
     | Immediate Rational DNAType
+    | GlobalArr String DNAType
     | None
     
 data JmpCondition

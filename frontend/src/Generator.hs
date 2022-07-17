@@ -5,12 +5,13 @@ import CompilerShared
 import Control.Arrow
 import Control.Monad
 import Control.Monad.Trans
-import Control.Monad.Trans.State.Lazy
+import Control.Monad.Trans.State.Lazy ( runState, state, put, get, State )
 import Data.Fix
 import Data.Functor.Compose
 import Data.Maybe
 import Parser
 import Validator
+import qualified Data.Char as C
 import qualified Data.List as L
 import qualified Data.Map as M
 import Debug.Trace
@@ -35,6 +36,7 @@ type LocalEnv = M.Map String DNAVariable
 type TempVarList = (TempFreeList, Int)
 type GeneratorAction = State GeneratorState
 type StructMap = M.Map String StructDefinition
+type GlobalsMap = M.Map String (DNAType, [Rational])
 
 data GeneratorState = GeneratorState
     { labelIdx :: Int
@@ -44,6 +46,7 @@ data GeneratorState = GeneratorState
     , blockDepth :: Int
     , loopLabel :: (String, String)
     , accessCtx :: AccessContext
+    , globalEnv :: GlobalsMap
     } deriving Show
 
 data AccessContext = AccessContext
@@ -51,6 +54,13 @@ data AccessContext = AccessContext
     , fromOperand :: DNAOperand
     , doDeref :: Bool
     } deriving Show
+
+addGlobal :: (DNAType, [Rational]) -> GeneratorAction DNAOperand
+addGlobal arr@(arrDt, arrVal) = do
+    GeneratorState lblCtr freeVars envMap structs depth lbls aCtx gEnvMap <- get 
+    let name = "glob" ++ show (M.size gEnvMap)
+    put $ GeneratorState lblCtr freeVars envMap structs depth lbls aCtx (M.insert name arr gEnvMap)
+    return $ GlobalArr name arrDt
 
 lookupStruct :: String -> GeneratorAction StructDefinition
 lookupStruct structName = do
@@ -63,24 +73,24 @@ nameDepth name count = replicate count '_' ++ name
 
 addDepth :: Int -> GeneratorAction ()
 addDepth v = do
-    GeneratorState lblCtr freeVars envMap structs depth lbls aCtx <- get 
-    put $ GeneratorState lblCtr freeVars envMap structs (depth + v) lbls aCtx
+    GeneratorState lblCtr freeVars envMap structs depth lbls aCtx gEnvMap <- get 
+    put $ GeneratorState lblCtr freeVars envMap structs (depth + v) lbls aCtx gEnvMap
 
 setLabels :: (String, String) -> GeneratorAction (String, String)
 setLabels newLbls = do
-    GeneratorState lblCtr freeVars envMap structs depth oldLbls aCtx <- get 
-    put $ GeneratorState lblCtr freeVars envMap structs depth newLbls aCtx
+    GeneratorState lblCtr freeVars envMap structs depth oldLbls aCtx gEnvMap <- get 
+    put $ GeneratorState lblCtr freeVars envMap structs depth newLbls aCtx gEnvMap
     return oldLbls
 
 setEnvironment :: LocalEnv -> GeneratorAction ()
 setEnvironment env = do
-    GeneratorState lblCtr freeVars _ structs depth lbls aCtx <- get 
-    put $ GeneratorState lblCtr freeVars env structs depth lbls aCtx
+    GeneratorState lblCtr freeVars _ structs depth lbls aCtx gEnvMap <- get 
+    put $ GeneratorState lblCtr freeVars env structs depth lbls aCtx gEnvMap
 
 setActiveContext :: AccessContext -> GeneratorAction AccessContext
 setActiveContext nCtx = do
-    GeneratorState lblCtr freeVars env structs depth lbls aCtx <- get 
-    put $ GeneratorState lblCtr freeVars env structs depth lbls nCtx
+    GeneratorState lblCtr freeVars env structs depth lbls aCtx gEnvMap <- get 
+    put $ GeneratorState lblCtr freeVars env structs depth lbls nCtx gEnvMap
     return aCtx
 
 addLocal :: String -> DataType -> GeneratorAction ()
@@ -140,9 +150,9 @@ initialGeneratorState defs = GeneratorState 0
                                    M.empty
                                   (M.fromList (map (fst &&& id) defs))
                                    1
-                                   ("", "")
-                                   (AccessContext ("", []) None False)
-
+                                  ("", "")
+                                  (AccessContext ("", []) None False)
+                                  M.empty
 
 getOperandType :: DNAOperand -> DNAType
 getOperandType (Variable isPtr var)
@@ -154,12 +164,13 @@ getOperandType (Variable isPtr var)
     getOperandVar (Local _ tp) = tp
 getOperandType (MemoryRef _ _ _ tp) = tp
 getOperandType (Immediate _ tp) = tp
+getOperandType (GlobalArr _ tp) = tp
 getOperandType _                = error "getOperandType on Operand with 'None', this should not have passed through the validator"
 
 addVar :: String -> DNAVariable -> GeneratorAction ()
 addVar name var = do
-    GeneratorState lblCtr freeVars envMap structs depth lbls aCtx <- get
-    put $ GeneratorState lblCtr freeVars (M.insert name var envMap) structs depth lbls aCtx
+    GeneratorState lblCtr freeVars envMap structs depth lbls aCtx gEnvMap <- get
+    put $ GeneratorState lblCtr freeVars (M.insert name var envMap) structs depth lbls aCtx gEnvMap
 getDNAType :: StructMap -> DataType -> DNAType
 getDNAType structs (typeName, ptrList)
     | null ptrList && M.member typeName structs = Int8 (sizeofStruct structs typeName)
@@ -178,6 +189,7 @@ getDNAType structs (typeName, ptrList)
         | typename == "int"   = Int32
         | typename == "long"  = Int64
         | typename == "float" = Float
+        | typename == "bool"  = Int8
         | otherwise           = const InvalidType
 getDNATypeForOperand :: StructMap -> DataType -> DNAType
 getDNATypeForOperand structs dt@(typeName, ptrList)
@@ -187,34 +199,34 @@ getDNATypeForOperand structs dt@(typeName, ptrList)
 
 getTempVar :: DNAType -> GeneratorAction DNAVariable
 getTempVar typeName = do
-    GeneratorState lblCtr (tmpList, tmpCount) envMap structs depth lbls aCtx <- get
+    GeneratorState lblCtr (tmpList, tmpCount) envMap structs depth lbls aCtx gEnvMap <- get
     if M.member typeName tmpList
       then do
         let (Just freeVars) = M.lookup typeName tmpList
         if not $ null freeVars
           then do
-            put $ GeneratorState lblCtr (M.insert typeName (tail freeVars) tmpList, tmpCount) envMap structs depth lbls aCtx
+            put $ GeneratorState lblCtr (M.insert typeName (tail freeVars) tmpList, tmpCount) envMap structs depth lbls aCtx gEnvMap
             return $ head freeVars
           else addNewTemp typeName
       else addNewTemp typeName
   where
     addNewTemp :: DNAType -> GeneratorAction DNAVariable
     addNewTemp typeName = do
-        state (\(GeneratorState lblCtr (tmpMap, tmpCount) envMap structs depth lbls aCtx) ->
+        state (\(GeneratorState lblCtr (tmpMap, tmpCount) envMap structs depth lbls aCtx gEnvMap) ->
             let newVarName = 't' : show tmpCount
                 newVar = Temp newVarName typeName
                 newTmpList = M.findWithDefault [] typeName tmpMap
                 newTmpMap = M.insert typeName newTmpList tmpMap
                 newEnvMap = M.insert newVarName newVar envMap
-            in (newVar, GeneratorState lblCtr (newTmpMap, tmpCount + 1) newEnvMap structs depth lbls aCtx))
+            in (newVar, GeneratorState lblCtr (newTmpMap, tmpCount + 1) newEnvMap structs depth lbls aCtx gEnvMap))
 
 freeTempVar :: DNAVariable -> GeneratorAction ()
 freeTempVar var = do
-    GeneratorState lblCtr (tmpList, tmpCount) envMap structs depth lbls aCtx <- get
+    GeneratorState lblCtr (tmpList, tmpCount) envMap structs depth lbls aCtx gEnvMap <- get
     let result = insertVar var tmpList
     when
       (isJust result)
-      (put $ GeneratorState lblCtr (fromJust result, tmpCount) envMap structs depth lbls aCtx)
+      (put $ GeneratorState lblCtr (fromJust result, tmpCount) envMap structs depth lbls aCtx gEnvMap)
   where
     insertVar :: DNAVariable -> TempFreeList -> Maybe TempFreeList
     insertVar var tmpMap = do
@@ -233,21 +245,22 @@ tryFreeOperand _ = return ()
 
 createLabel :: GeneratorAction String
 createLabel = do
-    GeneratorState ctr temps env structs depth lbls aCtx <- get
+    GeneratorState ctr temps env structs depth lbls aCtx gEnvMap <- get
     let newLbl = "l" ++ show ctr
-    put $ GeneratorState (ctr + 1) temps env structs depth lbls aCtx
+    put $ GeneratorState (ctr + 1) temps env structs depth lbls aCtx gEnvMap
     return newLbl
 
 resetState :: GeneratorAction ()
 resetState = do
-    GeneratorState lblCtr _ _ structs _ _ _ <- get
-    put $ GeneratorState lblCtr (M.empty, 0) M.empty structs 1 ("", "") (AccessContext ("", []) None False)
+    GeneratorState lblCtr _ _ structs _ _ _ globs <- get
+    put $ GeneratorState lblCtr (M.empty, 0) M.empty structs 1 ("", "") (AccessContext ("", []) None False) globs
 
-generateProgram :: Program -> [DNAFunctionDefinition]
+generateProgram :: Program -> ([DNAFunctionDefinition], GlobalsMap)
 generateProgram (funcs, structs) =
-    evalState (mapM generateFunction funcs) start
+    (resultVal, globalEnv resultState)
   where
     start = initialGeneratorState structs
+    (resultVal, resultState) = runState (mapM generateFunction funcs) start
 
 generateFunction :: FunctionDefinition -> GeneratorAction DNAFunctionDefinition
 generateFunction (FunctionDefinition rt name params root _) = do
@@ -349,27 +362,16 @@ generateIr = generateIrHelper . snd . getCompose . unFix
     generateIrHelper (DeclarationNode dataType id) = do
         addLocal id dataType
         return []
-    generateIrHelper (DefinitionNode dataType id expr) = do
-        addLocal id dataType
-        (exprBlock, resultOp) <- generateIrSyntaxExpr expr
-        localEnv <- env <$> get
-        structs <- structMap <$> get
-        idForBlock <- nameDepth id . blockDepth <$> get
-        let dnaType = getDNATypeForOperand structs dataType
-            var = Local idForBlock dnaType
-        if isArrayType dataType
-          then return $ exprBlock ++ [ArrayCopy (opVarRef var) resultOp (datatypeSize structs dataType)]
-          else return $ exprBlock ++ [Mov (opVar var) resultOp]
     generateIrHelper (BlockNode body) = do
         addDepth 1
         bodyBlock <- generateIr body
         addDepth (-1)
         return bodyBlock
     generateIrHelper ContinueNode = do
-        GeneratorState lblCtr freeVars envMap structs depth (_, condLbl) aCtx <- get
+        GeneratorState _ _ _ _ _ (_, condLbl) _ _ <- get
         return [Jmp Always condLbl]
     generateIrHelper BreakNode = do
-        GeneratorState lblCtr freeVars envMap structs depth (afterLbl, _) aCtx <- get
+        GeneratorState _ _ _ _ _ (afterLbl, _) _ _ <- get
         return [Jmp Always afterLbl]
     -- In the case of ignoring the result, we shouldn't leak temps here
     generateIrHelper (ExprNode expr) = do
@@ -677,7 +679,7 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
             (subBlock, resultOp) <- generateIrExpr expr
             beforeChange <- getTempVar (getOperandType resultOp)
             let imm = Immediate (toRational 1) (getOperandType resultOp)
-            assnBody <- generateAssign (if adds then PlusEq else MinusEq) resultOp imm exprType
+            assnBody <- generateAssign (if adds then PlusEq else MinusEq) resultOp imm exprType exprType
             return (subBlock ++ [Mov (opVar beforeChange) resultOp] ++ assnBody, opVar beforeChange)
     generateIrExprHelper exprType node@(IdentifierNode name) = do
         env <- env <$> get
@@ -688,7 +690,26 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
             IntConstant v    -> return ([], Immediate (toRational v) $ Int64 1)
             FloatConstant v  -> return ([], Immediate (toRational v) $ Float 1)
             BoolConstant v   -> return ([], Immediate (if v then 1 else 0) $ Int8 1)
-            StringConstant v -> error "Strings not supported yet"
+            CharConstant v   -> return ([], Immediate (toRational $ C.ord v) $ Int8 1)
+            StringConstant v -> do
+                let flatten = map (toRational . C.ord) v ++ [0]
+                newGlob <- addGlobal (Int8 (length flatten), flatten)
+                return ([], newGlob)
+            NullConstant     -> return ([], Immediate (toRational 0) $ Int64 1)
+    generateIrExprHelper exprType node@(ArrayLiteralNode lit) = do
+        structs <- structMap <$> get
+        let flatten = foldFix (combineArray . snd . getCompose) (annotExprEmpty node)
+            arrType = getDNAType structs (fst exprType, [])
+        newGlob <- addGlobal (arrType, flatten)
+        return ([], newGlob)
+      where
+        combineArray :: ExprF [Rational] -> [Rational]
+        combineArray (ArrayLiteralNode sublits)       = join sublits
+        combineArray (LiteralNode (IntConstant i))    = [toRational i]
+        combineArray (LiteralNode (FloatConstant f))  = [toRational f]
+        combineArray (LiteralNode (BoolConstant b))   = [toRational (if b then 1 else 0)] 
+        combineArray (LiteralNode (StringConstant s)) = map (toRational . C.ord) s
+        combineArray _                                = error "Can't generate for non-literal or non-array"
     generateIrExprHelper exprType node@(FunctionCallNode name args) = do
         instList <- mapM generateIrExpr args
         let paramInsts = zipWith ($) (map (Param . snd) instList) (map (exprToDNA . typeOf) args)
@@ -724,7 +745,7 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
     generateIrExprHelper exprType node@(AssignmentNode op lhs rhs) = do
         (rightBlock, resultOp2) <- generateIrExpr rhs
         (leftBlock, resultOp) <- generateIrExpr lhs
-        assnBlock <- generateAssign op resultOp resultOp2 exprType
+        assnBlock <- generateAssign op resultOp resultOp2 exprType (typeOf rhs)
         tryFreeOperand resultOp2
         return (rightBlock ++ leftBlock ++ assnBlock, resultOp)
     generateIrExprHelper exprType node@(CastNode toType expr) = do
@@ -770,12 +791,12 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
         tryFreeOperand structOp
         return (lhsBlock ++ rhsBlock, valOp)
 
-generateAssign :: AssignmentOp -> DNAOperand -> DNAOperand -> DataType -> GeneratorAction DNABlock
-generateAssign op to from toType
+generateAssign :: AssignmentOp -> DNAOperand -> DNAOperand -> DataType -> DataType -> GeneratorAction DNABlock
+generateAssign op to from toType fromType
     | isPointerType toType = do
         structs <- structMap <$> get
         temp <- getTempVar $ Int64 1
-        let copySize = datatypeSize structs (second (drop 1) toType)
+        let copySize = datatypeSize structs fromType
             copyOp = if isArrayType toType
                 then ArrayCopy to tempVar copySize
                 else Mov to tempVar

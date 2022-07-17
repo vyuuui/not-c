@@ -1,5 +1,9 @@
-short main() {
-    int x = 1;
-    int y = 2;
-    return x+y + 1 / 6;
+struct joe {
+    
+}
+char main() {
+    char *a[2];
+    a[0] = "str";
+    a[1] = "peepee";
+    return 'f';
 }

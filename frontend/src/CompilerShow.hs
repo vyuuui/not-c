@@ -3,6 +3,7 @@ module CompilerShow
 , showSyntaxTree
 , showDt
 , showFunction
+, showGlobals
 ) where
 
 import CompilerShared
@@ -10,6 +11,7 @@ import Data.Functor.Compose
 import Data.Fix
 import Control.Arrow
 import qualified Data.List as L
+import qualified Data.Map as M
 
 rewriteHead :: String -> [String] -> [String]
 rewriteHead str (h:t) = (str ++ drop (length str) h):t
@@ -20,6 +22,15 @@ showExprTreeLn expr = case getCompose $ unFix expr of
     (annot, IdentifierNode id) -> ["Id " ++ id ++ " : " ++ show annot]
     (annot, StructMemberNode id) -> ["Member " ++ id ++ " : " ++ show annot]
     (annot, LiteralNode ct) -> ["Literal " ++ show ct ++ " : " ++ show annot]
+    (annot, ArrayLiteralNode sub)
+        | null sub  -> ["ArrayLit : " ++ show annot]
+        | otherwise -> 
+            let header = ["ArrayLit : " ++ show annot]
+                children = (arr init &&& arr last) (map showExprTreeLn (reverse sub))
+                childrenShift = (arr (map . map) ("│ " ++) *** arr (map ("  "++))) children
+                markedHeads = (first (arr (fmap (rewriteHead "├─"))) >>> second (arr (rewriteHead "└─"))) childrenShift
+                combined = arr (\(hds, tl) -> concat hds ++ tl) markedHeads
+            in  header ++ combined
     (annot, FunctionCallNode name args)
         | null args -> ["Call " ++ name ++ " : " ++ show annot]
         | otherwise -> 
@@ -118,10 +129,6 @@ showSyntaxTree = unlines . showTreeR
                 subLns = rewriteHead "└─" $ map ("  "++) $ showTreeR block
             in  header ++ subLns
         (annot, DeclarationNode dt id) -> ["Declaration " ++ showDt dt ++ " " ++ show id ++ " : " ++ show annot]
-        (annot, DefinitionNode dt id expr) ->
-            let header = ["Definition " ++ showDt dt ++ " " ++ show id ++ " : " ++ show annot]
-                exprLns = rewriteHead "└─" $ map ("  "++) $ showTreeR expr
-            in  header ++ exprLns
         (annot, ExprNode e) -> showExprTreeLn e
         (annot, PrintNode e) ->
             let header = ["Print : " ++ show annot]
@@ -154,7 +161,10 @@ instance Show Token where
     show (Punctuation p) = p
     show (Keyword kw) = kw
     show Eof = "eof"
-    show (Invalid s) = s
+    show (Invalid _ UntermString) = "Unterminated string"
+    show (Invalid s UnknownChar) = "Unknown character " ++ s
+    show (Invalid s BadOperator) = "Invalid operator " ++ s
+    show (Invalid s BadCharStr) = "Invalid character literal " ++ s
 
 showDt :: DataType -> String
 showDt (dataTypeName, ptrList) = dataTypeName ++ concatMap (\x -> if x > 0 then "[" ++ show x ++ "]" else "*") ptrList
@@ -182,6 +192,7 @@ instance Show DNAOperand where
             | isRef = '&':show var
             | otherwise = show var
     show (Immediate val tp) = show (round val) ++ "::" ++ show tp
+    show (GlobalArr nm _) = '%':nm
     show None = "$nil"
 
 instance Show JmpCondition where
@@ -229,3 +240,20 @@ showFunction (name, vars, body) =
         bod = map show body
         things = [header, var, [".endframe", ".label " ++ name], bod, [".endsub"]]
     in unlines $ concat things
+
+showGlobals :: M.Map String (DNAType, [Rational]) -> String
+showGlobals m = concatMap showGlobal $ M.toList m
+  where
+    showGlobal :: (String, (DNAType, [Rational])) -> String
+    showGlobal (name, (tp, vals)) =
+        let header = [".array " ++ name ++ " " ++ show tp]
+            vals = L.intercalate "," convertedVals
+        in  unlines $ header ++ [vals] ++ [".endarray"]
+      where
+        convertedVals = case tp of
+            Int8 _  -> map (show . round) vals
+            Int16 _ -> map (show . round) vals
+            Int32 _ -> map (show . round) vals
+            Int64 _ -> map (show . round) vals
+            Float _ -> map (show . realToFrac) vals
+            _       -> error "Invalid type for array"

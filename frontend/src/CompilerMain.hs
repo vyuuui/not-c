@@ -19,8 +19,8 @@ dropAndCountComment (h1:h2:t) count
 dropAndCountComment ls count = ("", count + length ls)
 
 printError :: String -> FailureInfo -> IO ()
-printError progStr FailureInfo {failReason = failMsg, failRegion = (start, end), failLocation = opt} = do
-    let realEnd = end + length (takeWhile (/='\n') (drop end (take opt progStr)))
+printError progStr FailureInfo {failReason = failMsg, failRegion = (start, end), failLocation = fLoc} = do
+    let realEnd = end + length (takeWhile (/='\n') (drop end (take fLoc progStr)))
         (lineNum0, colNum0, str0) = findMessage progStr start realEnd (1, 1, "")
         nextStart = removeWhitespace str0 0
         (lineNum1, colNum1, str1) = findMessage str0 nextStart (length str0) (lineNum0, colNum0, "")
@@ -73,8 +73,10 @@ generateAndPrint file = do
              return ([], [])
     let res = validateProgram prog
     case res of
-        Left msg      -> printError contents msg
-        Right prog  -> putStr $ concatMap showFunction $ generateProgram prog 
+        Left msg   -> printError contents msg
+        Right prog -> 
+            let (asm, globs) = generateProgram prog 
+            in putStrLn (concatMap showFunction asm) >> putStr (showGlobals globs)
 
 generateAndWrite :: String -> String -> IO ()
 generateAndWrite srcFile destFile = do
@@ -88,8 +90,10 @@ generateAndWrite srcFile destFile = do
     case res of
         Left msg      -> printError contents msg
         Right prog  -> do
-            let asmStr = concatMap showFunction $ generateProgram prog 
-            writeFile destFile asmStr
+            let (asm, globs) = generateProgram prog 
+                asmStr = concatMap showFunction asm
+                globStr = showGlobals globs
+            writeFile destFile (asmStr ++ globStr)
 
 main :: IO ()
 main = return ()

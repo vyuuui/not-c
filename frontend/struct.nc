@@ -17,11 +17,11 @@ struct test0 {
 
 void sam() {
     test0 x;
+    char myStr[3] = "89";
+    int y = false;
     int abc[10];
     int def[10] = abc;
 }
-
-
 
 int main() {
     sam();

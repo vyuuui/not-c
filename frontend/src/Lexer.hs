@@ -8,6 +8,7 @@ import System.IO
 import Debug.Trace
 import Control.Arrow
 import Data.Tuple (swap)
+import CompilerShow
 
 type LexerResult = (Token, Int, String)
 
@@ -18,8 +19,7 @@ control = S.fromList ["if", "else", "for", "while", "return", "break", "continue
 punctuation :: S.Set String
 punctuation = S.fromList ["(", ")", "{", "}", ",", ";", "[", "]"]
 keyword :: S.Set String
-keyword = S.fromList ["struct", "print"]
-
+keyword = S.fromList ["struct", "print", "no"]
 
 allOperatorChars :: S.Set Char
 allOperatorChars = S.foldr (S.union . S.fromList) S.empty operators
@@ -63,9 +63,27 @@ lexStringSingle env str = lexStringSingleHelper env str 0
                                       totalParsed = numParsed + length token + 1
                                   in  (classifyLetterToken (h:token) env, totalParsed, rest)
         | C.isSpace h           = uncurry (lexStringSingleHelper env) $ second (+numParsed) (dropAndCount C.isSpace (h:t))
-        | h == '"'              = lexStringConstant t numParsed
-        | otherwise             = (Invalid [h], numParsed + 1, t)
+        | h == '"'              = lexStringConstant t (numParsed + 2)
+        | h == '\''             = lexCharConstant t (numParsed + 1)
+        | otherwise             = (Invalid [h] UnknownChar, numParsed + 1, t)
       where
+        lexCharConstant :: String -> Int -> LexerResult
+        lexCharConstant [] numParsed = (Invalid "" BadCharStr, numParsed, "")
+        lexCharConstant [h] numParsed = (Invalid [h] BadCharStr, numParsed + 1, "")
+        lexCharConstant str numParsed
+            | normHead !! 1 == '\'' &&
+              head normHead /= '\'' &&
+              head normHead /= '\\' = (Constant $ CharConstant (head normHead), numParsed + 2, normRest)
+            | take 3 str == "\\n'" = (Constant $ CharConstant '\n', numParsed + 3, escRest)
+            | take 3 str == "\\t'" = (Constant $ CharConstant '\t', numParsed + 3, escRest)
+            | take 3 str == "\\r'" = (Constant $ CharConstant '\r', numParsed + 3, escRest)
+            | take 3 str == "\\\\'" = (Constant $ CharConstant '\\', numParsed + 3, escRest)
+            | take 3 str == "\\''" = (Constant $ CharConstant '\'', numParsed + 3, escRest)
+            | otherwise            = (Invalid [head str] BadCharStr, numParsed + 1, tail str)
+          where
+            (escHead, escRest) = splitAt 3 str
+            (normHead, normRest) = splitAt 2 str
+
         lexStringConstant :: String -> Int -> LexerResult
         lexStringConstant str numParsed = tryAppendStr $ until endingQuote buildString ("", numParsed, str)
           where
@@ -77,10 +95,10 @@ lexStringSingle env str = lexStringSingleHelper env str 0
                 | h1 == '\\' && h2 == 'r' = (lhs ++ ['\r'], numParsed + 2, t)
                 | h1 == '\\' && h2 == '"' = (lhs ++ ['"'], numParsed + 2, t)
                 | otherwise               = (lhs ++ [h1], numParsed + 1, h2:t)
-            buildString (lhs, numParsed, [h]) = (lhs ++ [h], numParsed + 1, t)
+            buildString (lhs, numParsed, [h]) = (lhs ++ [h], numParsed + 1, [])
             buildString (lhs, numParsed, [])  = (lhs, numParsed + 1, "")
             tryAppendStr (buildStr, numParsed, _:t) = (Constant $ StringConstant buildStr, numParsed, t)
-            tryAppendStr (invStr, numParsed, rest) = (Invalid invStr, numParsed, rest)
+            tryAppendStr (invStr, numParsed, rest) = (Invalid invStr UntermString, numParsed, rest)
         classifyNumberToken str 
             | '.' `elem` str = Constant $ FloatConstant (read str :: Float)
             | otherwise      = Constant $ IntConstant (read str :: Int)
@@ -93,7 +111,7 @@ lexStringSingle env str = lexStringSingleHelper env str 0
             | otherwise                = Identifier str
         lexOperator :: String -> Int -> LexerResult
         lexOperator str numParsed
-            | null longestMatch = (Invalid str, numParsed, rest)
+            | null longestMatch = (Invalid str BadOperator, numParsed, rest)
             | otherwise         = (Operator longestMatch, numParsed + length longestMatch, drop (length longestMatch) str)
           where
             checkStop (_, _, [])            = True

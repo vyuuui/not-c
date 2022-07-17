@@ -93,6 +93,10 @@ peekTwoToken = do
 
 -- Generic helpers to validate a token given a predicate (and extract)
 extractStrIfValid :: (Token -> Bool) -> String -> Token -> ParseAction String
+extractStrIfValid check tokenClass token@(Invalid _ _) =
+    raiseFailureHere $ show token ++ " when trying to get " ++ tokenClass
+extractStrIfValid check tokenClass Eof =
+    raiseFailureHere $ "Unexpected EOF when trying to get " ++ tokenClass
 extractStrIfValid check tokenClass token =
     if check token
       then return (extractInner token)
@@ -106,6 +110,10 @@ extractStrIfValid check tokenClass token =
     extractInner _               = ""
 
 checkTokenPredicate :: (Token -> Bool) -> String -> Token -> ParseAction ()
+checkTokenPredicate check expected token@(Invalid _ _) =
+    raiseFailureHere $ show token ++ " when trying to get token " ++ show expected
+checkTokenPredicate check expected Eof =
+    raiseFailureHere $ "Unexpected EOF when trying to get token " ++ show expected
 checkTokenPredicate check expected token =
     unless
       (check token)
@@ -182,7 +190,7 @@ parseStruct = do
     id <- scanIdentifier
     insertSymbol id TypeSym
     eatPunctuation "{"
-    structMembers <- whileM (isTypeName syms <$> peekToken) parseStructMember
+    structMembers <- whileM (isTypeName <$> getSymbolMap <*> peekToken) parseStructMember
     eatPunctuation "}"
     return (id, structMembers)
   where
@@ -316,6 +324,7 @@ parseStatement = do
             expressionNode <- doAnnotateSyntax parseWrapExpression
             eatPunctuation ";"
             return $ PrintNode expressionNode
+        | isInvalid lookahead     = raiseFailureHere $ show lookahead ++ " when parsing statement"
         | otherwise               = raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " when parsing statement"
 
 doAnnotateSyntax :: ParseAction (SyntaxNodeF SyntaxNode) -> ParseAction SyntaxNode
@@ -369,7 +378,8 @@ parseForInit = getSymbolMap >>= \syms -> peekToken >>= parseForInitLookahead sym
         | isTypeName syms lookahead        = parseDeclaration
         | isExpression lookahead           = parseWrapExpression
         | punctuationMatches ";" lookahead = return EmptyNode
-        | otherwise                        = raiseFailureHere "Unexpected token in for loop init"
+        | isInvalid lookahead              = raiseFailureHere $ show lookahead ++ " when parsing statement"
+        | otherwise                        = raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " in for loop init"
 
 parseForExpr :: ParseAction (SyntaxNodeF SyntaxNode)
 parseForExpr = peekToken >>= parseForExprLookahead
@@ -379,7 +389,8 @@ parseForExpr = peekToken >>= parseForExprLookahead
         | isExpression lookahead           = parseWrapExpression
         | punctuationMatches ";" lookahead ||
           punctuationMatches ")" lookahead = return EmptyNode
-        | otherwise                        = raiseFailureHere "Unexpected token in for loop expression"
+        | isInvalid lookahead              = raiseFailureHere $ show lookahead ++ " in for loop"
+        | otherwise                        = raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " in for loop"
 
 parseForLoop :: ParseAction (SyntaxNodeF SyntaxNode)
 parseForLoop = do
@@ -398,6 +409,7 @@ parseForLoop = do
 
 parseDeclaration :: ParseAction (SyntaxNodeF SyntaxNode)
 parseDeclaration = do
+    declBegin <- getLexPosition
     (typeName, ptrList) <- parseType
     id <- scanIdentifier
     arrayList <- parseArraySpec
@@ -405,9 +417,14 @@ parseDeclaration = do
     case nextTok of
         Operator "=" -> do 
             eatToken
-            expressionNode <- doAnnotateSyntax parseWrapExpression
+            expressionNode <- parseExpression
+            declEnd <- getLexPosition
             insertSymbol id VarSym
-            return $ DefinitionNode (typeName, arrayList ++ ptrList) id expressionNode
+            let exprAnn = annotExprLoc (SourceLoc declBegin declEnd) expressionNode
+                assnAnn = copyAnnot exprAnn $ AssignmentNode NoOp (annotExprEmpty $ IdentifierNode id) exprAnn
+                assnExprAnn = annotSyntax declBegin declEnd (ExprNode assnAnn)
+                declAnn  = copyAnnot assnExprAnn (DeclarationNode (typeName, arrayList ++ ptrList) id)
+            return $ SeqNode declAnn assnExprAnn
         _            -> do 
             insertSymbol id VarSym
             return $ DeclarationNode (typeName, arrayList ++ ptrList) id
@@ -581,7 +598,6 @@ parseIndirectionTrail root = do
     parseSubscript :: ParseAction (ExprF Expr)
     parseSubscript = do
         eatToken
-        trace "Parsing subscript" return ()
         idx <- doAnnotateExpr parseExpression
         eatPunctuation "]"
         doAnnotateExpr (return $ ArrayIndexNode root idx) >>= parseIndirectionTrail
@@ -589,10 +605,14 @@ parseIndirectionTrail root = do
 parseBaseExpr :: ParseAction (ExprF Expr)
 parseBaseExpr = do
     lookahead <- peekToken
+    
     if | isIdentifier lookahead           -> parseId
        | isConstant lookahead             -> parseConstant
+       | keywordMatches "no" lookahead    -> eatToken >> return (LiteralNode NullConstant)
        | punctuationMatches "(" lookahead -> parseParenthesis
-       | otherwise                        -> raiseFailureHere "Unexpected token in base expression"
+       | punctuationMatches "[" lookahead -> parseArrayLit
+       | isInvalid lookahead              -> raiseFailureHere $ show lookahead ++ " in base expression"
+       | otherwise                        -> raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " in base expression"
   where
     parseId :: ParseAction (ExprF Expr)
     parseId = IdentifierNode <$> scanIdentifier
@@ -604,6 +624,22 @@ parseBaseExpr = do
         expr <- doAnnotateExpr parseExpression
         eatPunctuation ")"
         return $ ParenthesisNode expr
+    parseArrayLit :: ParseAction (ExprF Expr)
+    parseArrayLit = do
+        arrayBegin <- getLexPosition
+        eatPunctuation "["
+        check <- peekToken
+        if | isConstant check -> parseArrayLitHelper arrayBegin parseConstant
+           | punctuationMatches "[" check -> parseArrayLitHelper arrayBegin parseArrayLit
+           | otherwise -> raiseFailureHere $ "Unexpected token in array parse " ++ show check
+      where
+        parseArrayLitHelper arrayBegin parser = do
+            firstElem <- parseConstant
+            listOut <- (firstElem:) <$> whileM (punctuationMatches "," <$> peekToken) (eatToken >> parser)
+            eatPunctuation "]"
+            arrayEnd <- getLexPosition
+            let annotOut = map (annotExprLoc (SourceLoc arrayBegin arrayEnd)) listOut
+            return $ ArrayLiteralNode annotOut
 
 type ArgumentList = [Expr]
 parseArgList :: ParseAction ArgumentList
@@ -644,7 +680,6 @@ parseType = do
     ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken $> 0)
     return (typeName, ptrLevels)
   
--- print x;
 {-
 prog = toplevel
 toplevel = function | structdecl
@@ -684,12 +719,14 @@ indirection_trail = '++' indirection_trail |
                     '.' identifier indirection_trail |
                     '[' expression ']' indirection_trail |
                     ε
-baseexpr = identifier | constant | '(' expression ')'
+baseexpr = identifier | constant | arraylit | '(' expression ')'
 arglist = expression (',' expression)* | ε
 type = identifier qualifier
 qualifier = '*'*
 arrayspec = '[' constant ']'*
+arraylit = '[' arraylit (',' arraylit) ']' | '[' constant (',' constant)* ']'
 constant = 'true' | 'false' | number
 number = -?[0-9]+\.[0-9]*
 identifier = [A-Za-z][A-Za-z0-9_]*
+[1,2,3,4,5]
 -}

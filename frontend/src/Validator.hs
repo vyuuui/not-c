@@ -1,4 +1,4 @@
--- {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
+{-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 module Validator ( validateProgram ) where
 
 import CompilerShared
@@ -101,9 +101,9 @@ validateProgram (funcs, structs) =
       (GeneratorState M.empty [EnvBlock False M.empty])
     where 
         validateAllStructs :: [StructDefinition] -> GeneratorAction ()
-        validateAllStructs = mapM_ (\x -> validateStruct x >> addStruct x)
+        validateAllStructs = mapM_ (\x -> addStruct x >> validateStruct x)
         validateAllFunctions :: [FunctionDefinition] -> GeneratorAction [FunctionDefinition]
-        validateAllFunctions = mapM (\x -> validateFunction x >>= \newFunc -> addFunctionToEnvironment x >> return newFunc)
+        validateAllFunctions = mapM (\x -> addFunctionToEnvironment x >> validateFunction x)
         addFunctionToEnvironment :: FunctionDefinition -> GeneratorAction ()
         addFunctionToEnvironment (FunctionDefinition rtype name params _ _) =
             insertIntoEnv name (FunctionVar rtype params)
@@ -128,6 +128,9 @@ validateProgram (funcs, structs) =
 validateStruct :: StructDefinition -> GeneratorAction ()
 validateStruct (name, memberList) = do
     curStructs <- structMap <$> get
+    when
+      (any (\(dt@(tp, ptr), _) -> (tp == name) && (null ptr || isArrayType dt)) memberList)
+      (raiseFailure ("Struct " ++ name ++ " cannot have non-pointer self reference") 0 0)
     unless
       (all (validateMember curStructs) memberList && membersUnique (map snd memberList))
       (raiseFailure ("Validating struct " ++ name ++ " failed") 0 0)
@@ -163,10 +166,12 @@ isImplicitCastAllowed toType@(toName, toPtr) fromType@(fromName, fromPtr) =
         | isIntegralType type1 && isIntegralType type2 = True
         | otherwise                                    = False
     isPointerCastAllowed =
-        not (null toPtr) &&
-        toName == fromName &&
-        length toPtr == length fromPtr &&
-        last toPtr == 0
+        isPointerType toType &&
+        ((not (isArrayType toType) &&
+          fromType == nullType) ||
+         (toName == fromName &&
+          length toPtr == length fromPtr &&
+          last toPtr == 0))
 
 -- Syntax Tree actions (Stateful)
 -- Needs to modify state to trace variable declarations and scope changes
@@ -327,18 +332,6 @@ validateSyntaxNode node = do
         when (declaredType == voidType) (failCantDeclareVoid id)
         createVariable declaredType nodeLoc >>= insertIntoEnv id
         return sn
-    validateSyntaxNodeF (DefinitionNode declaredType id expr) = do
-        unlessM (canShadow id) (failCantShadow id)
-        when (declaredType == voidType) (failCantDeclareVoid id)
-        createVariable declaredType nodeLoc >>= insertIntoEnv id
-        expr <- validateSyntaxNode expr
-        exprType <- getExprDecltype expr
-        unless (isImplicitCastAllowed declaredType exprType) (failCantCastDef declaredType exprType)
-        if exprType /= declaredType
-          then do
-            fmap (DefinitionNode declaredType id . copyAnnot expr . injectCast declaredType)
-                 (getExprRoot expr)
-          else return $ DefinitionNode declaredType id expr
     validateSyntaxNodeF (ExprNode expression) = do
         expression <- computeDecltype <$> (environment <$> get)
                                       <*> (structMap <$> get)
@@ -382,6 +375,8 @@ binaryTypeResult structs op lhsType rhsType
         | isIntegralType lhsType && isIntegralType rhsType = dupe2nd boolType $ largestType lhsType rhsType
         | isIntegralType lhsType && isFloatType rhsType    = (boolType, rhsType, rhsType)
         | isFloatType lhsType && isIntegralType rhsType    = (boolType, lhsType, lhsType)
+        | lhsType == nullType                              = (boolType, rhsType, rhsType)
+        | rhsType == nullType                              = (boolType, lhsType, lhsType)
         | otherwise                                        = invalidResult
     decideRelCompare :: (DataType, DataType, DataType)
     decideRelCompare
@@ -497,10 +492,18 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         StructVar    t   -> (ExprInfo t LValue sl, n)
         _                -> (ExprInfo invalidType LValue sl, n)
     alg (ExprInfo _ _ sl, n@(LiteralNode const)) = case const of
+        CharConstant _   -> (ExprInfo charType RValue sl, n)
         IntConstant _    -> (ExprInfo longType RValue sl, n)
         FloatConstant _  -> (ExprInfo floatType RValue sl, n)
         BoolConstant _   -> (ExprInfo boolType RValue sl, n)
         StringConstant s -> (ExprInfo ("char", [length s + 1]) RValue sl, n)
+        NullConstant     -> (ExprInfo nullType RValue sl, n)
+    alg (ExprInfo _ _ sl, n@(ArrayLiteralNode exprs)) =
+        let types = map typeOf exprs
+            firstElem@(firstTp, firstPtr) = head types
+        in if | elem invalidType types  -> (ExprInfo invalidType RValue sl, n)
+              | all (==firstElem) types -> (ExprInfo (firstTp, length exprs:firstPtr) RValue sl, n)
+              | otherwise               -> (ExprInfo invalidType RValue sl, n)
     alg (ExprInfo _ _ sl, n@(FunctionCallNode name args)) =
         case lookup name of
             FunctionVar rtype params -> fixupFunction rtype params
@@ -542,13 +545,22 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         | otherwise = (ExprInfo invalidType RValue sl, n)
       where
         typeChecks = [isIntegralType, isFloatType, (isPointerType &&& (not . isArrayType)) >>> uncurry (&&)]
-    alg (ExprInfo _ _ sl, n@(AssignmentNode NoOp lhs rhs)) -- TODO: this should probably be broken into a (x) = x op y | op /= NoOp
-        | typeOf lhs == invalidType          = (ExprInfo invalidType LValue sl, n)
-        | typeOf newRhs == invalidType       = (ExprInfo invalidType LValue sl, AssignmentNode NoOp lhs newRhs)
-        | handednessOf lhs /= LValue         = (ExprInfo invalidType LValue sl, AssignmentNode NoOp lhs newRhs)
-        | otherwise                          = (ExprInfo (typeOf lhs) LValue sl, AssignmentNode NoOp lhs newRhs)
+    alg (ExprInfo _ _ sl, n@(AssignmentNode NoOp lhs rhs))
+        | typeOf lhs == invalidType    = (ExprInfo invalidType LValue sl, n)
+        | handednessOf lhs /= LValue   = (ExprInfo invalidType LValue sl, n)
+        | typeOf newRhs == invalidType = if isArrayType (typeOf lhs) && canCopyArray
+                                           then (ExprInfo (typeOf lhs) LValue sl, n)
+                                           else (ExprInfo invalidType LValue sl, AssignmentNode NoOp lhs newRhs)
+        | otherwise                    = (ExprInfo (typeOf lhs) LValue sl, AssignmentNode NoOp lhs newRhs)
       where
         newRhs = castOrInvalid rhs $ typeOf lhs
+        canCopyArray = isArrayType (typeOf rhs) &&
+                       (lhsTn == rhsTn) &&
+                       (head lhsPtr >= head rhsPtr) &&
+                       (tail lhsPtr == tail rhsPtr)
+          where
+            (lhsTn, lhsPtr) = typeOf lhs
+            (rhsTn, rhsPtr) = typeOf rhs
     alg (ExprInfo _ _ sl, n@(AssignmentNode op lhs rhs))
         | typeOf lhs == invalidType                     = (ExprInfo invalidType LValue sl, n)
         | typeOf rhs == invalidType                     = (ExprInfo invalidType LValue sl, n)
@@ -625,6 +637,12 @@ findExprError env structs expr =
         | dataType info == invalidType = makeErr n ""
         | otherwise = Right info
     alg n@(info, LiteralNode _) = Right info
+    alg n@(info, ArrayLiteralNode subs)
+        | isLeft elemsErr = elemsErr
+        | dataType info == invalidType = makeErr n "Inconsistent types for array elements"
+        | otherwise = Right info
+      where
+        elemsErr = fmap (const info) (sequence subs)
     alg n@(info, FunctionCallNode name args)
         | isLeft argsErr = argsErr
         | otherwise = case lookupVar name env of

@@ -154,7 +154,7 @@ struct SubroutineInfo {
 struct Operand;
 
 struct SubroutineRetInfo {
-    uint64_t return_address;
+    int64_t return_address;
     Operand* return_store;
     SubroutineInfo* return_sub;
 };
@@ -165,7 +165,7 @@ struct GlobalArray {
 };
 
 struct CpuContext {
-    uint64_t program_counter;
+    int64_t program_counter;
    
    //http://www.unixwiz.net/techtips/x86-jumps.html
    
@@ -187,15 +187,41 @@ public:
     Operand(BaseType type) : type(type) {}
 
     template <typename T>
+    static T sign_extend(T val, size_t copied_size) {
+        if (sizeof(T) <= copied_size) {
+            return val;
+        } else if (reinterpret_cast<uint8_t*>(&val)[copied_size - 1] & 0x80) {
+            for (size_t i = copied_size; i < sizeof(T); i++) {
+                reinterpret_cast<uint8_t*>(&val)[i] = 0xff;
+            }
+            return val;
+        } else {
+            return val;
+        }
+    }
+
+    template <typename T>
     void set(T t) {
-        set_generic(static_cast<void*>(&t), std::min(base_type_size(type), sizeof(t)));
+        static_assert(std::is_signed_v<T>);
+        if constexpr (std::is_same_v<T, double>) {
+            set_generic(static_cast<void*>(&t), std::min(base_type_size(type), sizeof(t)));
+        } else {
+            int64_t to_long = static_cast<int64_t>(t);
+            set_generic(static_cast<void*>(&to_long), std::min(base_type_size(type), sizeof(int64_t)));
+        }
     }
 
     template <typename T>
     T get() {
         T t = {};
-        memcpy(&t, get_generic(), std::min(base_type_size(type), sizeof(t)));
-        return t;
+        if constexpr (std::is_same_v<T, double>) {
+            memcpy(&t, get_generic(), std::min(base_type_size(type), sizeof(t)));
+            return t;
+        } else {
+            memcpy(&t, get_generic(), std::min(base_type_size(type), sizeof(t)));
+            t = sign_extend(t, base_type_size(type));
+            return t;
+        }
     }
     
     BaseType get_type() {
@@ -472,7 +498,7 @@ public:
                 dest->set<int16_t>(src1->get<int16_t>() + src2->get<int16_t>());
                 break;
             case BaseType::Int8:
-                dest->set<uint64_t>(src1->get<int8_t>() + src2->get<int8_t>());
+                dest->set<int8_t>(src1->get<int8_t>() + src2->get<int8_t>());
                 break;
             default:
                 throw std::runtime_error("Unexpected cast_type in add");
@@ -512,7 +538,7 @@ public:
                 dest->set<int16_t>(src1->get<int16_t>() - src2->get<int16_t>());
                 break;
             case BaseType::Int8:
-                dest->set<uint64_t>(src1->get<int8_t>() - src2->get<int8_t>());
+                dest->set<int8_t>(src1->get<int8_t>() - src2->get<int8_t>());
                 break;
             default:
                 throw std::runtime_error("Unexpected cast_type in sub");
@@ -552,7 +578,7 @@ public:
                 dest->set<int16_t>(src1->get<int16_t>() * src2->get<int16_t>());
                 break;
             case BaseType::Int8:
-                dest->set<uint64_t>(src1->get<int8_t>() * src2->get<int8_t>());
+                dest->set<int8_t>(src1->get<int8_t>() * src2->get<int8_t>());
                 break;
             default:
                 throw std::runtime_error("Unexpected cast_type in mul");
@@ -592,7 +618,7 @@ public:
                 dest->set<int16_t>(src1->get<int16_t>() / src2->get<int16_t>());
                 break;
             case BaseType::Int8:
-                dest->set<uint64_t>(src1->get<int8_t>() / src2->get<int8_t>());
+                dest->set<int8_t>(src1->get<int8_t>() / src2->get<int8_t>());
                 break;
             default:
                 throw std::runtime_error("Unexpected cast_type in div");
@@ -631,7 +657,7 @@ public:
                 dest->set<int16_t>(src1->get<int16_t>() % src2->get<int16_t>());
                 break;
             case BaseType::Int8:
-                dest->set<uint64_t>(src1->get<int8_t>() % src2->get<int8_t>());
+                dest->set<int8_t>(src1->get<int8_t>() % src2->get<int8_t>());
                 break;
             default:
                 throw std::runtime_error("Unexpected cast_type in mod");
@@ -735,36 +761,36 @@ public:
         }
         switch (condition) {
         case JmpCondition::None:
-            ctx.program_counter = dest->get<uint64_t>() - 1;
+            ctx.program_counter = dest->get<int64_t>() - 1;
             break;
         case JmpCondition::Eq:
             if (ctx.compare_equal) {
-                ctx.program_counter = dest->get<uint64_t>() - 1;
+                ctx.program_counter = dest->get<int64_t>() - 1;
             }
             break;
         case JmpCondition::NotEq:
             if (!ctx.compare_equal) {
-                ctx.program_counter = dest->get<uint64_t>() - 1;
+                ctx.program_counter = dest->get<int64_t>() - 1;
             }
             break;
         case JmpCondition::Lt:
             if (ctx.compare_sign != ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>() - 1;
+                ctx.program_counter = dest->get<int64_t>() - 1;
             }
             break;
         case JmpCondition::Le:
             if (ctx.compare_equal || ctx.compare_sign != ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>() - 1;
+                ctx.program_counter = dest->get<int64_t>() - 1;
             }
             break;
         case JmpCondition::Ge:
             if (ctx.compare_sign == ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>() - 1;
+                ctx.program_counter = dest->get<int64_t>() - 1;
             }
             break;
         case JmpCondition::Gt:
             if (!ctx.compare_equal && ctx.compare_sign == ctx.compare_overflow) {
-                ctx.program_counter = dest->get<uint64_t>() - 1;
+                ctx.program_counter = dest->get<int64_t>() - 1;
             }
             break;
         }
@@ -835,7 +861,7 @@ public:
         // Step forward sub base based on current function size
         ctx.current_sub_base += ctx.current_sub->frame_size;
         ctx.current_sub = called_subroutine;
-        ctx.program_counter = dest->get<uint64_t>() - 1;
+        ctx.program_counter = dest->get<int64_t>() - 1;
     }
 
     virtual ~CallInstruction() {}
@@ -881,7 +907,7 @@ public:
             throw std::runtime_error("arraycopy called with non-pointer operands");
         }
         uint8_t* read_base = reinterpret_cast<uint8_t*>(src->get_absolute_ptr());
-        uint64_t write_addr = dest->get<int64_t>();
+        int64_t write_addr = dest->get<int64_t>();
         for (size_t i = 0; i < copy_count; i++) {
             ctx.stack.set_stack_var(write_addr + i, read_base + i, 1);
         }
@@ -1358,9 +1384,10 @@ std::optional<VariableInfo> parse_frame_variable(std::string line) {
     return vi;
 }
 
-std::optional<std::unordered_map<std::string, VariableInfo>>
+std::optional<std::pair<std::unordered_map<std::string, VariableInfo>, std::vector<std::string>>>
 parse_frame_description(std::ifstream& file) {
     std::unordered_map<std::string, VariableInfo> map;
+    std::vector<std::string> ordered_params;
     std::string line;
     for (getline_trim(file, line);
          line != ".endframe";
@@ -1376,8 +1403,11 @@ parse_frame_description(std::ifstream& file) {
             return std::nullopt;
         }
         map[vi->variable_name] = *vi;
+        if (vi->storage_type == StorageType::Parameter) {
+            ordered_params.emplace_back(vi->variable_name);
+        }
     }
-    return map;
+    return std::make_pair(map, ordered_params);
 }
 
 void parse_subroutine(std::ifstream& file, std::string subroutine_name, std::vector<Instruction*>& program) {
@@ -1391,24 +1421,24 @@ void parse_subroutine(std::ifstream& file, std::string subroutine_name, std::vec
     }
     uint64_t cur_stackoff = 0;
     // compute frame size, params size, and parameter stack offsets
-    for (auto&& [k, var_info] : *frame_vars) {
-        const size_t var_size = base_type_size(var_info.type_info) * var_info.count;
-        si.frame_size += var_size;
-        if (var_info.storage_type == StorageType::Parameter) {
-            si.params_size += var_size;
-            var_info.stack_offset = cur_stackoff;
-            cur_stackoff += var_size;
-        }
+    for (std::string const& param_name : frame_vars->second) {
+        auto& param_var_info = frame_vars->first[param_name];
+        const size_t var_size = base_type_size(param_var_info.type_info) * param_var_info.count;
+        si.params_size += var_size;
+        param_var_info.stack_offset = cur_stackoff;
+        cur_stackoff += var_size;
     }
     // compute stack offset for non-parameters
-    for (auto&& [k, var_info] : *frame_vars) {
+    for (auto&& [k, var_info] : frame_vars->first) {
+        const size_t var_size = base_type_size(var_info.type_info) * var_info.count;
+        si.frame_size += var_size;
         if (var_info.storage_type != StorageType::Parameter) {
             const size_t var_size = base_type_size(var_info.type_info) * var_info.count;
             var_info.stack_offset = cur_stackoff;
             cur_stackoff += var_size;
         }
     }
-    si.variable_map = std::move(*frame_vars);
+    si.variable_map = std::move(frame_vars->first);
 
     // parse instructions
     std::string line;
@@ -1487,7 +1517,7 @@ std::optional<int64_t> parse_constant(std::string& constant) {
     if (std::regex_match(constant, matches, flt_re)) {
         const double val = std::stod(matches[1]);
         constant = matches[2];
-        static_assert(sizeof(double) == sizeof(uint64_t));
+        static_assert(sizeof(double) == sizeof(int64_t));
         return *reinterpret_cast<int64_t const*>(&val);
     }
     if (std::regex_match(constant, matches, int_re)) {
@@ -1549,6 +1579,10 @@ void parse_global(std::ifstream& file, std::string const& arr_name, std::string 
 }
 
 int main(int argc, char** argv) {
+    char* fl[2];
+    fl[1] = "arraytest.asm";
+    argc = 2;
+    argv = fl;
     if (argc != 2) {
         std::cerr << "Invalid arguments\nUsage: ./interp <asm file>\n";
         return 1;
@@ -1592,7 +1626,7 @@ int main(int argc, char** argv) {
         };
         ctx.stack.change_size(8);
         ctx.call_stack.push(SubroutineRetInfo {
-            .return_address = program.size(),
+            .return_address = static_cast<int64_t>(program.size()),
             .return_store = &program_ret,
             .return_sub = &main_call,
         });
@@ -1601,7 +1635,8 @@ int main(int argc, char** argv) {
         ctx.program_counter = ctx.label_map["main"];
         ctx.stack.change_size(ctx.current_sub->frame_size - ctx.current_sub->params_size);
         while (ctx.program_counter < program.size()) {
-            program[ctx.program_counter]->execute(ctx);
+            Instruction* inst = program[ctx.program_counter];
+            inst->execute(ctx);
             ctx.program_counter++;
         }
         std::cout << "Done, returned " << program_ret.get<int64_t>() << std::endl;
