@@ -33,7 +33,7 @@ envInLoop = any inLoop
 -- map lookup over all blocks -> find first Just result -> Join Maybe(Maybe) to Maybe
 lookupVar :: String -> Environment -> Maybe VarInfo
 lookupVar id = join . L.find isJust . map (M.lookup id . varMap)
-lookupVarFailure :: String -> GeneratorAction VarInfo
+lookupVarFailure :: String -> ValidatorAction VarInfo
 lookupVarFailure id = do
     maybeVar <- lookupVar id <$> (environment <$> get)
     maybe
@@ -43,43 +43,43 @@ lookupVarFailure id = do
 
 type StructMap = M.Map String StructDefinition
 
-data GeneratorState = GeneratorState
+data ValidatorState = ValidatorState
     { structMap :: StructMap
     , environment :: Environment
     } deriving Show
 
-type GeneratorAction = StateT GeneratorState (Either FailureInfo)
+type ValidatorAction = StateT ValidatorState (Either FailureInfo)
 
 unlessM :: Monad m => m Bool -> m () -> m ()
 unlessM test def = test >>= (`unless` def)
 whenM :: Monad m => m Bool -> m () -> m ()
 whenM test def = test >>= (`when` def)
 
-putEnvironment :: Environment -> GeneratorAction ()
-putEnvironment newEnv = modify (\(GeneratorState structs env) -> GeneratorState structs newEnv)
-putStructs :: StructMap -> GeneratorAction ()
-putStructs newStructs = modify (\(GeneratorState structs env) -> GeneratorState newStructs env)
-addStruct :: StructDefinition -> GeneratorAction ()
+putEnvironment :: Environment -> ValidatorAction ()
+putEnvironment newEnv = modify (\(ValidatorState structs env) -> ValidatorState structs newEnv)
+putStructs :: StructMap -> ValidatorAction ()
+putStructs newStructs = modify (\(ValidatorState structs env) -> ValidatorState newStructs env)
+addStruct :: StructDefinition -> ValidatorAction ()
 addStruct struct@(name, _) =
     get >>= putStructs . M.insert name struct . structMap
 
-pushEnvironment :: Bool -> GeneratorAction ()
+pushEnvironment :: Bool -> ValidatorAction ()
 pushEnvironment isLoop =
     get >>= putEnvironment . (EnvBlock isLoop M.empty:)  . environment
 
-popEnvironment :: GeneratorAction ()
+popEnvironment :: ValidatorAction ()
 popEnvironment = get >>= putEnvironment . tail . environment
 
-createVariable :: DataType -> SourceLoc -> GeneratorAction VarInfo
+createVariable :: DataType -> SourceLoc -> ValidatorAction VarInfo
 createVariable dataType sl = get >>= createVarHelper dataType . structMap
   where
-    createVarHelper :: DataType -> StructMap -> GeneratorAction VarInfo
+    createVarHelper :: DataType -> StructMap -> ValidatorAction VarInfo
     createVarHelper dataType@(typename, _) structs
         | isPrimitiveType dataType      = return $ PrimitiveVar dataType
         | isStructType dataType structs = return $ StructVar dataType
         | otherwise                     = raiseFailureLoc ("Invalid typename " ++ typename) sl
 
-insertIntoEnv :: String -> VarInfo -> GeneratorAction ()
+insertIntoEnv :: String -> VarInfo -> ValidatorAction ()
 insertIntoEnv varName varInfo =
     get >>= putEnvironment . insert varName varInfo . environment
   where
@@ -87,7 +87,7 @@ insertIntoEnv varName varInfo =
     insert varName varInfo ((EnvBlock loop envMap):rest) = EnvBlock loop (M.insert varName varInfo envMap):rest
     insert _ _ [] = []
 
-validateInLoop :: SourceLoc -> GeneratorAction ()
+validateInLoop :: SourceLoc -> ValidatorAction ()
 validateInLoop sl = do
     env <- environment <$> get
     unless
@@ -95,19 +95,24 @@ validateInLoop sl = do
       (raiseFailureLoc "Not contained in a loop" sl)
 
 validateProgram :: Program -> Either FailureInfo Program
-validateProgram (funcs, structs) =
+validateProgram (globals, structs) =
     evalStateT
-      (validateAllStructs structs >> validateAllFunctions funcs >>= \x -> return (x, structs))
-      (GeneratorState M.empty [EnvBlock False M.empty])
+      (validateAllStructs structs >> validateAllGlobals globals >>= \x -> return (x, structs))
+      (ValidatorState M.empty [EnvBlock False M.empty])
     where 
-        validateAllStructs :: [StructDefinition] -> GeneratorAction ()
+        validateAllStructs :: [StructDefinition] -> ValidatorAction ()
         validateAllStructs = mapM_ (\x -> addStruct x >> validateStruct x)
-        validateAllFunctions :: [FunctionDefinition] -> GeneratorAction [FunctionDefinition]
-        validateAllFunctions = mapM (\x -> addFunctionToEnvironment x >> validateFunction x)
-        addFunctionToEnvironment :: FunctionDefinition -> GeneratorAction ()
+        validateAllGlobals :: [Global] -> ValidatorAction [Global]
+        validateAllGlobals = mapM validateGlobal
+        validateGlobal :: Global -> ValidatorAction Global
+        validateGlobal (Function fn) =
+            addFunctionToEnvironment fn >> validateFunction fn >>= return . Function
+        validateGlobal (GlobalVar node) =
+            validateSyntaxNode node >>= return . GlobalVar
+        addFunctionToEnvironment :: FunctionDefinition -> ValidatorAction ()
         addFunctionToEnvironment (FunctionDefinition rtype name params _ _) =
             insertIntoEnv name (FunctionVar rtype params)
-        validateFunction :: FunctionDefinition -> GeneratorAction FunctionDefinition
+        validateFunction :: FunctionDefinition -> ValidatorAction FunctionDefinition
         validateFunction (FunctionDefinition rtype fname params body sl) = do
             pushEnvironment False
             addFunctionParameters params $ paramsLoc sl
@@ -118,14 +123,14 @@ validateProgram (funcs, structs) =
             return $ FunctionDefinition rtype fname params body sl
           where
             -- Ensmarten me, you can technically have dead code at the end
-            validateReturns :: SyntaxNode -> GeneratorAction ()
+            validateReturns :: SyntaxNode -> ValidatorAction ()
             validateReturns node = return ()  -- TODO: this
-            addFunctionParameters :: DeclList -> [SourceLoc] -> GeneratorAction ()
+            addFunctionParameters :: DeclList -> [SourceLoc] -> ValidatorAction ()
             addFunctionParameters = (fmap . fmap) mapZip zip
               where
                 mapZip = mapM_ (\((dataType, id), sl) -> createVariable dataType sl >>= insertIntoEnv id)
 
-validateStruct :: StructDefinition -> GeneratorAction ()
+validateStruct :: StructDefinition -> ValidatorAction ()
 validateStruct (name, memberList) = do
     curStructs <- structMap <$> get
     when
@@ -175,14 +180,14 @@ isImplicitCastAllowed toType@(toName, toPtr) fromType@(fromName, fromPtr) =
 
 -- Syntax Tree actions (Stateful)
 -- Needs to modify state to trace variable declarations and scope changes
-canShadow :: String -> GeneratorAction Bool
+canShadow :: String -> ValidatorAction Bool
 canShadow varName = get <&> canShadowHelper varName . environment
   where
     canShadowHelper :: String -> Environment -> Bool
     canShadowHelper varName ((EnvBlock _ map):_) = not $ M.member varName map
     canShadowHelper varName [] = True
 
-skipBlockAndValidate :: SyntaxNode -> GeneratorAction SyntaxNode
+skipBlockAndValidate :: SyntaxNode -> ValidatorAction SyntaxNode
 skipBlockAndValidate node = do
     let (loc, nodeF) = getCompose $ unFix node
     result <- case nodeF of
@@ -190,42 +195,42 @@ skipBlockAndValidate node = do
         _               -> raiseFailureLoc "Expected to find a block" loc
     return $ Fix $ Compose (loc, BlockNode result)
 
-validateSyntaxNode :: SyntaxNode -> GeneratorAction SyntaxNode
+validateSyntaxNode :: SyntaxNode -> ValidatorAction SyntaxNode
 validateSyntaxNode node = do
     result <- validateHelper $ getCompose $ unFix node
     return $ Fix $ Compose result
   where
-    validateHelper :: (SourceLoc, SyntaxNodeF SyntaxNode) -> GeneratorAction (SourceLoc, SyntaxNodeF SyntaxNode)
+    validateHelper :: (SourceLoc, SyntaxNodeF SyntaxNode) -> ValidatorAction (SourceLoc, SyntaxNodeF SyntaxNode)
     validateHelper = mapM validateSyntaxNodeF
 
     nodeLoc :: SourceLoc
     nodeLoc = fst $ getCompose $ unFix node
 
     -- Failure messages for syntax nodes
-    failCantCastCondition :: DataType -> GeneratorAction ()
+    failCantCastCondition :: DataType -> ValidatorAction ()
     failCantCastCondition condType =
         raiseFailureLoc ("Cannot convert for condition expression from " ++ showDt condType ++ " to bool") nodeLoc
-    failCantCastReturn :: DataType -> DataType -> GeneratorAction ()
+    failCantCastReturn :: DataType -> DataType -> ValidatorAction ()
     failCantCastReturn t0 t1 =
         raiseFailureLoc ("Return type " ++ showDt t0 ++ " does not match function type " ++ showDt t1) nodeLoc
-    failCantShadow :: String -> GeneratorAction ()
+    failCantShadow :: String -> ValidatorAction ()
     failCantShadow id =
         raiseFailureLoc ("Cannot redeclare variable with name " ++ id) nodeLoc
-    failCantDeclareVoid :: String -> GeneratorAction ()
+    failCantDeclareVoid :: String -> ValidatorAction ()
     failCantDeclareVoid id = raiseFailureLoc ("Cannot declare the variable " ++ id ++ " with type void") nodeLoc
-    failCantCastDef :: DataType -> DataType -> GeneratorAction ()
+    failCantCastDef :: DataType -> DataType -> ValidatorAction ()
     failCantCastDef t0 t1 =
         raiseFailureLoc ("Cannot cast definition expression from " ++ showDt t0 ++ " to " ++ showDt t1) nodeLoc
-    failExprInvalid :: Expr -> GeneratorAction ()
+    failExprInvalid :: Expr -> ValidatorAction ()
     failExprInvalid expr = do
         exprErr <- findExprError <$> (environment <$> get) <*> (structMap <$> get) <*> pure expr
         raiseFailureLoc (message exprErr) (location exprErr)
 
-    getExprDecltype :: SyntaxNode -> GeneratorAction DataType
+    getExprDecltype :: SyntaxNode -> ValidatorAction DataType
     getExprDecltype node = case snd $ getCompose $ unFix node of 
         ExprNode expr -> return $ typeOf expr
         _             -> raiseFailureLoc "Expected an expression" nodeLoc
-    getExprRoot :: SyntaxNode -> GeneratorAction Expr
+    getExprRoot :: SyntaxNode -> ValidatorAction Expr
     getExprRoot node = case snd $ getCompose $ unFix node of 
         ExprNode expr -> return expr
         _             -> raiseFailureLoc "Expected an expression" nodeLoc
@@ -237,7 +242,7 @@ validateSyntaxNode node = do
 
     -- Primary recursive logic for validating SyntaxNodes
     -- Fans out to validating Exprs @ ExprNode
-    validateSyntaxNodeF :: SyntaxNodeF SyntaxNode -> GeneratorAction (SyntaxNodeF SyntaxNode)
+    validateSyntaxNodeF :: SyntaxNodeF SyntaxNode -> ValidatorAction (SyntaxNodeF SyntaxNode)
     validateSyntaxNodeF EmptyNode = return EmptyNode
     validateSyntaxNodeF (SeqNode lhs rhs) = do
         lhs <- validateSyntaxNode lhs
@@ -255,7 +260,7 @@ validateSyntaxNode node = do
         block <- validateSyntaxNode block
         popEnvironment
         return $ WhileNode condition block
-    validateSyntaxNodeF (ForNode init condition expr block) = do 
+    validateSyntaxNodeF (ForNode init condition expr block or) = do 
         pushEnvironment True
         init <- validateSyntaxNode init
         -- Correct a for condition that is EmptyNode to an expression that is `true`
@@ -272,7 +277,8 @@ validateSyntaxNode node = do
         -- We want to count the for body in the same "scope" as the iterator
         block <- skipBlockAndValidate block
         popEnvironment
-        return $ ForNode init condition expr block
+        or <- validateSyntaxNode or
+        return $ ForNode init condition expr block or
     validateSyntaxNodeF (PrintNode expr) = do
         expr <- validateSyntaxNode expr
         getExprDecltype expr
@@ -445,6 +451,7 @@ unaryTypeResult op (subType, subHandedness)
     decideReference (typeName, ptrList) = ((typeName, 0:ptrList), RValue)
     decideDereference :: DataType -> (DataType, Handedness)
     decideDereference (typeName, ptrList)
+        | (typeName, tail ptrList) == voidType = (invalidType, LValue)
         | not (null ptrList) = ((typeName, tail ptrList), LValue)
         | otherwise          = (invalidType, LValue)
     decidePrefix :: DataType -> (DataType, Handedness)
@@ -597,12 +604,32 @@ computeDecltype env structs = foldFix (Fix . Compose . alg . getCompose)
         fixStructMember (ExprInfo _ _ sl, n@(StructMemberNode name)) struct =
             (ExprInfo (getMemberType struct name) LValue sl, n)
         fixStructMember _ _ = error "Member access contains non-struct-member rhs"
-    alg (ExprInfo _ _ sl, n@(CastNode dataType sub)) = -- TODO: add checks for explicit cast
-        if typeOf sub == invalidType
-          then (ExprInfo invalidType (handednessOf sub) sl, n)
-          else (ExprInfo dataType (handednessOf sub) sl, n)
+    alg (ExprInfo _ _ sl, n@(CastNode dataType sub)) =
+        if validCast dataType (typeOf sub)
+          then (ExprInfo dataType RValue sl, n)
+          else (ExprInfo invalidType RValue sl, n)
+      where
+        validCast :: DataType -> DataType -> Bool
+        validCast to from
+            | isIntegralType to && isIntegralType from         = True
+            | to == floatType && isIntegralType from           = True
+            | isIntegralType to && from == floatType           = True
+            | isIntegralType to && isExclusivePointer from     = True
+            | isExclusivePointer to && isIntegralType from     = True
+            | to == boolType && isIntegralType from            = True
+            | isIntegralType to && from == boolType            = True
+            | isExclusivePointer to && isExclusivePointer from = True
+            | isExclusivePointer to && isArrayType from        = True
+            | otherwise                                        = False
     -- This will be dealt with by recomputeDeclWithStruct
     alg (ExprInfo _ _ sl, n@(StructMemberNode _)) = (ExprInfo invalidType LValue sl, n)
+    alg (ExprInfo _ _ sl, n@(DynamicAllocationNode dataType count))
+        | dataType == voidType          = (ExprInfo invalidType RValue sl, n)
+        | isIntegralType (typeOf count) = (ExprInfo (second (0:) dataType) RValue sl, n)
+        | otherwise                     = (ExprInfo invalidType RValue sl, n)
+    alg (ExprInfo _ _ sl, n@(DynamicFreeNode address))
+        | isExclusivePointer (typeOf address) = (ExprInfo voidType RValue sl, n)
+        | otherwise                           = (ExprInfo invalidType RValue sl, n)
 
 data ExprError = ExprError
     { location :: SourceLoc
@@ -672,7 +699,9 @@ findExprError env structs expr =
             Negate                            -> makeErr n $ "Can't negate non-integral or non-float type " ++ showSub sub
             Not                               -> makeErr n $ "Can't apply not to non-boolean type " ++ showSub sub
             Reference                         -> makeErr n "Can't take the reference of non-identifier"
-            Dereference                       -> makeErr n $ "Can't dereference non-pointer type " ++ showSub sub
+            Dereference
+                | isPointerType (subType sub) -> makeErr n $ "Can't dereference pointer of type " ++ showSub sub
+                | otherwise                   -> makeErr n $ "Can't dereference non-pointer type " ++ showSub sub
             PrefixInc
                 | subHandedness sub == RValue -> makeErr n "Can't do prefix ++ of r-value"
                 | otherwise                   -> makeErr n $ "Can't do prefix ++ on type " ++ showSub sub
@@ -719,6 +748,7 @@ findExprError env structs expr =
         | isLeft sub = sub
         | dataType info == invalidType = makeErr n $ "Can not cast from " ++ showSub sub ++ " to " ++ showDt castType
         | otherwise = Right info
+    
 
 -- Error layering:
 -- data ErrorLayer { loc :: SourceLoc, msg :: String }

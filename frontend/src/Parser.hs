@@ -28,11 +28,11 @@ getSymbolMap = symbolMap <$> get
 
 pushSymbolEnv, popSymbolEnv :: ParseAction ()
 pushSymbolEnv = do
-    ParseState lexer typeEnv funcs structs syms lp <- get
-    put $ ParseState lexer typeEnv funcs structs (M.empty:syms) lp
+    ParseState lexer typeEnv globals structs syms lp <- get
+    put $ ParseState lexer typeEnv globals structs (M.empty:syms) lp
 popSymbolEnv = do
-    ParseState lexer typeEnv funcs structs syms lp <- get
-    put $ ParseState lexer typeEnv funcs structs (tail syms) lp
+    ParseState lexer typeEnv globals structs syms lp <- get
+    put $ ParseState lexer typeEnv globals structs (tail syms) lp
 
 getLexPosition, getPrevLexPosition :: ParseAction Int
 getLexPosition = do
@@ -44,27 +44,27 @@ getPrevLexPosition = do
 
 setCurrentLexStart :: Int -> ParseAction ()
 setCurrentLexStart pos = do
-    ParseState lexer typeEnv funcs structs syms _ <- get
-    put $ ParseState lexer typeEnv funcs structs syms pos
+    ParseState lexer typeEnv globals structs  syms _ <- get
+    put $ ParseState lexer typeEnv globals structs syms pos
 
 insertSymbol :: String -> SymbolType -> ParseAction ()
 insertSymbol symName sym = do
     when (S.member symName baseTypes) (raiseFailureHere $ "Can't declare reserved typename " ++ symName)
-    ParseState lexer typeEnv funcs structs syms lp <- get
-    put $ ParseState lexer typeEnv funcs structs (M.insert symName sym (head syms) : tail syms) lp
+    ParseState lexer typeEnv globals structs syms lp <- get
+    put $ ParseState lexer typeEnv globals structs (M.insert symName sym (head syms) : tail syms) lp
 
 -- Lexes a new token, adding it to the LexerState
 -- Returns the newly lexed token
 lexNewToken :: ParseAction Token
 lexNewToken = do
-    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms lp <- get
+    ParseState (cacheTok, progStr, clt) typeEnv globals structs  syms lp <- get
     let (newTok, numParsed, restProg) = lexStringSingle typeEnv progStr
-    put $ ParseState (cacheTok ++ [(newTok, numParsed)], restProg, clt) typeEnv funcs structs syms lp
+    put $ ParseState (cacheTok ++ [(newTok, numParsed)], restProg, clt) typeEnv globals structs syms lp
     return newTok
 
 scanToken :: ParseAction Token
 scanToken = do
-    ParseState (cacheTok, progStr, clt) typeEnv funcs structs syms _ <- get
+    ParseState (cacheTok, progStr, clt) typeEnv globals structs  syms _ <- get
     when (null cacheTok) (void lexNewToken)
     state popToken
 
@@ -90,6 +90,24 @@ peekTwoToken = do
             tok1 <- lexNewToken
             tok2 <- lexNewToken
             return (tok1, tok2)
+
+peekThreeToken :: ParseAction (Token, Token, Token)
+peekThreeToken = do
+    (cacheTok, _, _) <- getLexerState
+    case cacheTok of
+        tok1:tok2:tok3:restTok -> return (fst tok1, fst tok2, fst tok3)
+        [tok1]            -> do
+            tok2 <- lexNewToken
+            tok3 <- lexNewToken
+            return (fst tok1, tok2, tok3)
+        [tok1, tok2]      -> do
+            tok3 <- lexNewToken
+            return (fst tok1, fst tok2, tok3)
+        _                 -> do
+            tok1 <- lexNewToken
+            tok2 <- lexNewToken
+            tok3 <- lexNewToken
+            return (tok1, tok2, tok3)
 
 -- Generic helpers to validate a token given a predicate (and extract)
 extractStrIfValid :: (Token -> Bool) -> String -> Token -> ParseAction String
@@ -156,23 +174,31 @@ eatKeyword val = scanToken >>= validateKeyword val
 
 parseProg :: String -> Either FailureInfo Program
 parseProg progStr =
-    fmap (\finalState -> (funcList finalState, structList finalState)) (execStateT whatToExecute (initialState progStr))
+    fmap (\finalState -> (globalsList finalState, structList finalState)) (execStateT whatToExecute (initialState progStr))
   where
     whatToExecute = whileM_ (not . isEof <$> peekToken) parseTopLevel
 
 parseTopLevel :: ParseAction ()
 parseTopLevel = do
-    token <- peekToken
-    case token of 
+    (tok1, tok2, tok3) <- peekThreeToken
+    case tok1 of 
         Keyword "struct" -> parseAndInsertStruct
-        Identifier _ -> parseAndInsertFunction
-        _ -> eatToken >> raiseFailureHere ("Unexpected top level token " ++ show token)
+        Identifier _ -> parseAndInsertGlobal tok3
+        _ -> eatToken >> raiseFailureHere ("Unexpected top level token " ++ show tok1)
   where
-    parseAndInsertFunction :: ParseAction ()
-    parseAndInsertFunction = do
-        func <- parseFunction
-        ParseState lexer env funcs structs syms lp <- get
-        put $ ParseState lexer env (funcs ++ [func]) structs syms lp
+    parseAndInsertGlobal :: Token -> ParseAction ()
+    parseAndInsertGlobal tok3 =
+        if punctuationMatches "(" tok3
+          then do
+            func <- parseFunction
+            ParseState lexer env globals structs syms lp <- get
+            put $ ParseState lexer env (globals ++ [Function func]) structs syms lp
+          else do
+            decl <- doAnnotateSyntax parseDeclaration
+            ParseState lexer env globals structs syms lp <- get
+            put $ ParseState lexer env (globals ++ [GlobalVar decl]) structs syms lp
+            eatPunctuation ";"
+                
     parseAndInsertStruct :: ParseAction ()
     parseAndInsertStruct = do
         lp <- getLexPosition
@@ -180,8 +206,8 @@ parseTopLevel = do
         struct@(name, _) <- parseStruct
         lp <- getLexPosition
         setCurrentLexStart lp
-        ParseState lexer env funcs structs syms lp <- get
-        put $ ParseState lexer (S.insert name env) funcs (structs ++ [struct]) syms lp
+        ParseState lexer env globals structs  syms lp <- get
+        put $ ParseState lexer (S.insert name env) globals (structs ++ [struct])  syms lp
 
 parseStruct :: ParseAction StructDefinition
 parseStruct = do
@@ -274,7 +300,8 @@ isBlock, isExpression, isLvalue, isConditional, isWhileLoop, isForLoop, isReturn
 isBlock = punctuationMatches "{"
 isExpression tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(",
                                 operatorMatches "!", operatorMatches "&", operatorMatches "*",
-                                operatorMatches "-", operatorMatches "++", operatorMatches "--"]
+                                operatorMatches "-", operatorMatches "++", operatorMatches "--",
+                                keywordMatches "bloat", keywordMatches "unbloat"]
 isLvalue tok = any ($ tok) [isIdentifier, isConstant, punctuationMatches "(", punctuationMatches "*" ]
 isConditional = controlMatches "if"
 isWhileLoop = controlMatches "while"
@@ -404,8 +431,14 @@ parseForLoop = do
     forExpr <- doAnnotateSyntax parseForExpr
     eatPunctuation ")"
     block <- doAnnotateSyntax parseBlock
+    lookahead <- peekToken
+    orBlock <- if controlMatches "or" lookahead
+    then do
+        eatToken
+        doAnnotateSyntax parseBlock
+    else return $ annotSyntaxEmpty EmptyNode
     popSymbolEnv
-    return $ ForNode forInit forCond forExpr block
+    return $ ForNode forInit forCond forExpr block orBlock
 
 parseDeclaration :: ParseAction (SyntaxNodeF SyntaxNode)
 parseDeclaration = do
@@ -539,26 +572,32 @@ parseMultiplication = parseOpPrecedence parseUnary [("*", BinaryOpNode Multiplic
 
 parseUnary :: ParseAction (ExprF Expr)
 parseUnary = do
-    maybeOp <- peekToken
-    if | operatorMatches "-" maybeOp -> do
-             eatToken
-             UnaryOpNode Negate <$> doAnnotateExpr parseUnary
-       | operatorMatches "!" maybeOp -> do
-             eatToken
-             UnaryOpNode Not <$> doAnnotateExpr parseUnary
-       | operatorMatches "&" maybeOp -> do
-             eatToken
-             UnaryOpNode Reference <$> doAnnotateExpr parseUnary
-       | operatorMatches "*" maybeOp -> do
-             eatToken
-             UnaryOpNode Dereference <$> doAnnotateExpr parseUnary
-       | operatorMatches "++" maybeOp -> do
-             eatToken
-             UnaryOpNode PrefixInc <$> doAnnotateExpr parseUnary
-       | operatorMatches "--" maybeOp -> do
-             eatToken
-             UnaryOpNode PrefixDec <$> doAnnotateExpr parseUnary
-       | otherwise -> parseIndirection
+    smap <- symbolMap <$> get
+    (op, secondTok) <- peekTwoToken
+    if  | operatorMatches "-" op -> do
+            eatToken
+            UnaryOpNode Negate <$> doAnnotateExpr parseUnary
+        | operatorMatches "!" op -> do
+            eatToken
+            UnaryOpNode Not <$> doAnnotateExpr parseUnary
+        | operatorMatches "&" op -> do
+            eatToken
+            UnaryOpNode Reference <$> doAnnotateExpr parseUnary
+        | operatorMatches "*" op -> do
+            eatToken
+            UnaryOpNode Dereference <$> doAnnotateExpr parseUnary
+        | operatorMatches "++" op -> do
+            eatToken
+            UnaryOpNode PrefixInc <$> doAnnotateExpr parseUnary
+        | operatorMatches "--" op -> do
+            eatToken
+            UnaryOpNode PrefixDec <$> doAnnotateExpr parseUnary
+        | punctuationMatches "(" op && isTypeName smap secondTok-> do
+            eatToken
+            dataType <- parseType
+            eatPunctuation ")"
+            CastNode dataType <$> doAnnotateExpr parseUnary
+        | otherwise -> parseIndirection
 
 parseIndirection :: ParseAction (ExprF Expr)
 parseIndirection = do
@@ -606,13 +645,15 @@ parseBaseExpr :: ParseAction (ExprF Expr)
 parseBaseExpr = do
     lookahead <- peekToken
     
-    if | isIdentifier lookahead           -> parseId
-       | isConstant lookahead             -> parseConstant
-       | keywordMatches "no" lookahead    -> eatToken >> return (LiteralNode NullConstant)
-       | punctuationMatches "(" lookahead -> parseParenthesis
-       | punctuationMatches "[" lookahead -> parseArrayLit
-       | isInvalid lookahead              -> raiseFailureHere $ show lookahead ++ " in base expression"
-       | otherwise                        -> raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " in base expression"
+    if  | isIdentifier lookahead             -> parseId
+        | isConstant lookahead               -> parseConstant
+        | keywordMatches "no" lookahead      -> eatToken >> return (LiteralNode NullConstant)
+        | punctuationMatches "(" lookahead   -> parseParenthesis
+        | punctuationMatches "[" lookahead   -> parseArrayLit
+        | isInvalid lookahead                -> raiseFailureHere $ show lookahead ++ " in base expression"
+        | keywordMatches "bloat" lookahead   -> parseBloat
+        | keywordMatches "unbloat" lookahead -> parseUnbloat
+        | otherwise                          -> raiseFailureHere $ "Unexpected token " ++ show lookahead ++ " in base expression"
   where
     parseId :: ParseAction (ExprF Expr)
     parseId = IdentifierNode <$> scanIdentifier
@@ -640,6 +681,22 @@ parseBaseExpr = do
             arrayEnd <- getLexPosition
             let annotOut = map (annotExprLoc (SourceLoc arrayBegin arrayEnd)) listOut
             return $ ArrayLiteralNode annotOut
+    parseBloat :: ParseAction (ExprF Expr)
+    parseBloat = do
+        eatKeyword "bloat"
+        eatPunctuation "("
+        dataType <- parseType
+        eatPunctuation ","
+        expr <- doAnnotateExpr parseExpression
+        eatPunctuation ")"
+        return $ DynamicAllocationNode dataType expr
+    parseUnbloat :: ParseAction (ExprF Expr)
+    parseUnbloat = do
+        eatKeyword "unbloat"
+        eatPunctuation "("
+        expr <- doAnnotateExpr parseExpression
+        eatPunctuation ")"
+        return $ DynamicFreeNode expr
 
 type ArgumentList = [Expr]
 parseArgList :: ParseAction ArgumentList
@@ -682,7 +739,7 @@ parseType = do
   
 {-
 prog = toplevel
-toplevel = function | structdecl
+toplevel = function | structdecl | declaration
 function = type identifier '(' paramlist ')' block
 structdecl = 'struct' identifier '{' member* '}'
 member = type identifier arrayspec ';'
@@ -711,7 +768,7 @@ ordcomp = addition ('<' addition)* | addition ('>' addition)* | addition ('<=' a
 addition = multiplication ('+' multiplication)* | multiplication ('-' multiplication)*
 multiplication = unary ('*' unary)* | unary ('/' unary)* | unary ('%' unary)*
 unary = '-' unary | '!' unary | '&' unary | '*' unary | '(' type ')' |
-        '++' unary | '--' unary | indirection
+        '++' unary | '--' unary | '(' type ')' unary | indirection
 indirection = identifier '(' arglist ')' indirection_rest |
               baseexpr indirection_rest 
 indirection_trail = '++' indirection_trail |
@@ -719,7 +776,8 @@ indirection_trail = '++' indirection_trail |
                     '.' identifier indirection_trail |
                     '[' expression ']' indirection_trail |
                     ε
-baseexpr = identifier | constant | arraylit | '(' expression ')'
+baseexpr = identifier | constant | arraylit | '(' expression ')' |
+           'bloat' '(' type ',' number ')' | 'unbloat' '(' expression ')'
 arglist = expression (',' expression)* | ε
 type = identifier qualifier
 qualifier = '*'*

@@ -114,10 +114,11 @@ voidType = ("void", [])
 ptrdiffType = longType
 
 -- Checking basic types
-isValueType, isPointerType, isArrayType, isFloatType, isBoolType, isVoidType, isBasePointer :: DataType -> Bool
+isValueType, isPointerType, isArrayType, isExclusivePointer, isFloatType, isBoolType, isVoidType, isBasePointer :: DataType -> Bool
 isValueType (_, ptrList) = null ptrList 
 isPointerType = not . isValueType
-isArrayType (_, ptrList) = not (null ptrList) && (head ptrList /= 0) 
+isArrayType (_, ptrList) = not (null ptrList) && (head ptrList /= 0)
+isExclusivePointer = (isPointerType &&& (not . isArrayType)) >>> uncurry (&&)
 isFloatType = (==floatType)
 isBoolType = (==boolType)
 isVoidType = (==voidType)
@@ -186,6 +187,8 @@ data ExprF r
     | AssignmentNode AssignmentOp r r
     | MemberAccessNode Bool r r
     | CastNode DataType r
+    | DynamicAllocationNode DataType r
+    | DynamicFreeNode r
     deriving (Functor)
 
 data BinaryOp
@@ -257,7 +260,7 @@ data SyntaxNodeF r
     | SeqNode r r
     -- Control
     | WhileNode r r
-    | ForNode r r r r
+    | ForNode r r r r r
     | IfNode r r 
     | IfElseNode r r r
     | ReturnNode r
@@ -291,7 +294,7 @@ data FailureInfo = FailureInfo { failReason :: String, failRegion :: (Int, Int),
 type TypeEnv = S.Set String
 type LexerState = ([TokenPos], String, (Int, Int))
 type ParseAction = StateT ParseState (Either FailureInfo)
-type Program = ([FunctionDefinition], [StructDefinition])
+type Program = ([Global], [StructDefinition])
 type StructDefinition = (String, [(DataType, String)])
 
 data SymbolType = FuncSym | TypeSym | VarSym | UnkSym deriving (Show, Eq)
@@ -310,10 +313,12 @@ data FunctionAnnotation = FunctionAnnotation
     , paramsLoc :: [SourceLoc]
     }
 
+data Global = Function FunctionDefinition | GlobalVar SyntaxNode
+
 data ParseState = ParseState
     { lexerState :: LexerState
     , typeEnv :: TypeEnv  -- List of all valid types
-    , funcList :: [FunctionDefinition]
+    , globalsList :: [Global]
     , structList :: [StructDefinition]
     , symbolMap :: SymbolMap  -- List of all taken symbol names + kind
     , currentNodeLexStart :: Int
@@ -338,9 +343,9 @@ getIdentifierType _ []          = UnkSym
 getIdentifierType id (map:rest) = if M.member id map then map M.! id else getIdentifierType id rest
 
 popToken :: ParseState -> (Token, ParseState)
-popToken (ParseState (h:t, rest, (curclt, prevclt)) env funcs structs syms lp) =
-    (fst h, ParseState (t, rest, (curclt + snd h, curclt)) env funcs structs syms lp)
-popToken (ParseState ([], rest, clt) env funcs structs syms lp) = error "popToken called on empty token list"
+popToken (ParseState (h:t, rest, (curclt, prevclt)) env globals structs syms lp) =
+    (fst h, ParseState (t, rest, (curclt + snd h, curclt)) env globals structs syms lp)
+popToken (ParseState ([], rest, clt) env globals structs syms lp) = error "popToken called on empty token list"
 
 data DNAType
     = Int8  Int

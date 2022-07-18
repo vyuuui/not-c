@@ -3,6 +3,7 @@ module CompilerShow
 , showSyntaxTree
 , showDt
 , showFunction
+, showArrayConsts
 , showGlobals
 ) where
 
@@ -100,8 +101,9 @@ showSyntaxTree = unlines . showTreeR
                 bodyLns = rewriteHead "├─" $ map ("│ " ++) $ showTreeR body
                 condLns = rewriteHead "└─" $ map ("  "++) $ showTreeR cond
             in  header ++ bodyLns ++ condLns
-        (annot, ForNode init cond expr body) ->
+        (annot, ForNode init cond expr body or) ->
             let header = ["For : " ++ show annot]
+                orLns   = rewriteHead "├─" $ map ("│ " ++) $ showTreeR or
                 bodyLns = rewriteHead "├─" $ map ("│ " ++) $ showTreeR body
                 exprLns = rewriteHead "├─" $ map ("│ " ++) $ showTreeR expr
                 condLns = rewriteHead "├─" $ map ("│ " ++) $ showTreeR cond
@@ -241,8 +243,8 @@ showFunction (name, vars, body) =
         things = [header, var, [".endframe", ".label " ++ name], bod, [".endsub"]]
     in unlines $ concat things
 
-showGlobals :: M.Map String (DNAType, [Rational]) -> String
-showGlobals m = concatMap showGlobal $ M.toList m
+showArrayConsts :: M.Map String (DNAType, [Rational]) -> String
+showArrayConsts m = concatMap showGlobal $ M.toList m
   where
     showGlobal :: (String, (DNAType, [Rational])) -> String
     showGlobal (name, (tp, vals)) =
@@ -257,3 +259,9 @@ showGlobals m = concatMap showGlobal $ M.toList m
             Int64 _ -> map (show . round) vals
             Float _ -> map (show . realToFrac) vals
             _       -> error "Invalid type for array"
+
+showGlobals :: M.Map String DNAVariable -> String
+showGlobals m =
+    let gvars = map snd $ M.toList m 
+        varsStr = map (\(Local name tp) -> ".glob " ++ name ++ ' ':show tp) gvars
+    in unlines varsStr

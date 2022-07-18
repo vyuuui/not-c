@@ -1579,10 +1579,6 @@ void parse_global(std::ifstream& file, std::string const& arr_name, std::string 
 }
 
 int main(int argc, char** argv) {
-    char* fl[2];
-    fl[1] = "arraytest.asm";
-    argc = 2;
-    argv = fl;
     if (argc != 2) {
         std::cerr << "Invalid arguments\nUsage: ./interp <asm file>\n";
         return 1;

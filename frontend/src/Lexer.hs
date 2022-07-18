@@ -15,11 +15,11 @@ type LexerResult = (Token, Int, String)
 operators :: S.Set String
 operators = S.fromList ["=", "+=", "-=", "*=", "/=", "%=", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "!", "&", "->", ".", "++", "--"]
 control :: S.Set String
-control = S.fromList ["if", "else", "for", "while", "return", "break", "continue"]
+control = S.fromList ["if", "else", "for", "while", "return", "break", "continue", "or"]
 punctuation :: S.Set String
 punctuation = S.fromList ["(", ")", "{", "}", ",", ";", "[", "]"]
 keyword :: S.Set String
-keyword = S.fromList ["struct", "print", "no"]
+keyword = S.fromList ["struct", "print", "no", "bloat", "unbloat"]
 
 allOperatorChars :: S.Set Char
 allOperatorChars = S.foldr (S.union . S.fromList) S.empty operators
