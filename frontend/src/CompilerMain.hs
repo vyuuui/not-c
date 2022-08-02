@@ -13,6 +13,7 @@ import Validator
 import Control.Arrow
 import Generator
 import Debug.Trace
+import GeneratorX86
 
 dropAndCountComment :: String -> Int -> (String, Int)
 dropAndCountComment (h1:h2:t) count

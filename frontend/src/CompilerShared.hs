@@ -380,21 +380,25 @@ data JmpCondition
 type DNABlock = [DNAInstruction]
 type DNAFunctionDefinition = (String, [DNAVariable], DNABlock)
 
-data DNAInstruction
-    = Mov DNAOperand DNAOperand
-    | Add DNAOperand DNAOperand DNAOperand
-    | Sub DNAOperand DNAOperand DNAOperand
-    | Mul DNAOperand DNAOperand DNAOperand
-    | Div DNAOperand DNAOperand DNAOperand
-    | Mod DNAOperand DNAOperand DNAOperand
-    | Cmp DNAOperand DNAOperand
+type DNAInstruction = DNAInstructionF DNAOperand DNAOperand
+
+data DNAInstructionF r w
+    = Mov w r
+    | Add w r r
+    | Sub w r r
+    | Mul w r r
+    | Div w r r
+    | Mod w r r
+    | Cmp w r
     | Jmp JmpCondition String
-    | Param DNAOperand DNAType
-    | Call String DNAOperand
-    | ReturnVal DNAOperand
+    | Param r DNAType
+    | Call String w
+    | ReturnVal r
     | ReturnVoid
-    | ArrayCopy DNAOperand DNAOperand Int
-    | IntToFloat DNAOperand DNAOperand
-    | FloatToInt DNAOperand DNAOperand
+    | ArrayCopy w r Int
+    | IntToFloat w r
+    | FloatToInt w r
+    | Allocate w r
+    | Deallocate r
     | Label String
-    | Print DNAOperand
+    | Print r

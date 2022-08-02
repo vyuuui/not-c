@@ -20,11 +20,10 @@ extra-source-files: CHANGELOG.md
 
 executable definitely-not-c
     main-is: CompilerMain.hs
-
     ghc-options:      -dynamic
 
     -- Modules included in this executable, other than Main.
-    other-modules: Lexer, CompilerShared, Parser, CompilerShow, Validator, Generator
+    other-modules: Lexer, CompilerShared, Parser, CompilerShow, Validator, Generator, GeneratorX86, Minimal64
 
     -- LANGUAGE extensions used by modules in this package.
     extensions: MultiWayIf
@@ -33,7 +32,7 @@ executable definitely-not-c
                       containers >= 0.6 && < 0.7,
                       mtl >= 2.2 && < 3,
                       transformers >= 0.5 && < 0.6,
-                      heap >= 1 && < 2,
-                      data-fix >= 0.3 && < 0.4
+                      data-fix >= 0.3 && < 0.4,
+                      endo >= 0.3 && < 0.4
     hs-source-dirs:   src
     default-language: Haskell2010

@@ -290,7 +290,6 @@ generateGlobal (GlobalVar var) = case snd $ getCompose $ unFix var of
         return name
     addGlobalDecl _ = error "Invalid global declaration"
 
-
 generateFunction :: FunctionDefinition -> GeneratorAction DNAFunctionDefinition
 generateFunction (FunctionDefinition rt name params root _) = do
     resetState
@@ -815,13 +814,26 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
         structs <- structMap <$> get
         struct <- lookupStruct $ fst $ typeOf lhs
         (lhsBlock, structOp) <- generateIrExpr lhs
-
         oldCtx <- setActiveContext $ AccessContext struct structOp isPtr
         (rhsBlock, valOp) <- generateIrExpr rhs
         setActiveContext oldCtx
-
         tryFreeOperand structOp
         return (lhsBlock ++ rhsBlock, valOp)
+    generateIrExprHelper exprType node@(DynamicAllocationNode dataType count) = do
+        structs <- structMap <$> get
+        ptrOut <- getTempVar $ Int64 1
+        scaleTmp <- getTempVar $ Int64 1
+        (allocCntBlock, allocCnt) <- generateIrExpr count
+        tryFreeOperand allocCnt
+        freeTempVar scaleTmp
+        let sz = datatypeSize structs dataType
+        return (allocCntBlock ++
+               [Mul (opVar scaleTmp) allocCnt (Immediate (toRational sz) (Int64 1)),
+                Allocate (opVar ptrOut) (opVar scaleTmp)], opVar ptrOut)
+    generateIrExprHelper exprType node@(DynamicFreeNode location) = do
+        (addrBlock, addr) <- generateIrExpr location
+        tryFreeOperand addr
+        return (addrBlock ++ [Deallocate addr], None)
 
 generateAssign :: AssignmentOp -> DNAOperand -> DNAOperand -> DataType -> DataType -> GeneratorAction DNABlock
 generateAssign op to from toType fromType

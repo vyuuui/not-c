@@ -106,9 +106,9 @@ validateProgram (globals, structs) =
         validateAllGlobals = mapM validateGlobal
         validateGlobal :: Global -> ValidatorAction Global
         validateGlobal (Function fn) =
-            addFunctionToEnvironment fn >> validateFunction fn >>= return . Function
+            Function <$> (addFunctionToEnvironment fn >> validateFunction fn)
         validateGlobal (GlobalVar node) =
-            validateSyntaxNode node >>= return . GlobalVar
+            GlobalVar <$> validateSyntaxNode node
         addFunctionToEnvironment :: FunctionDefinition -> ValidatorAction ()
         addFunctionToEnvironment (FunctionDefinition rtype name params _ _) =
             insertIntoEnv name (FunctionVar rtype params)
@@ -748,6 +748,15 @@ findExprError env structs expr =
         | isLeft sub = sub
         | dataType info == invalidType = makeErr n $ "Can not cast from " ++ showSub sub ++ " to " ++ showDt castType
         | otherwise = Right info
+    alg n@(info, DynamicAllocationNode tp count)
+        | isLeft count                 = count
+        | tp == voidType               = makeErr n "Can't dynamically allocate void-type"
+        | dataType info == invalidType = makeErr n $ "Allocation count parameter expected integral type not " ++ showSub count
+        | otherwise                    = Right info
+    alg n@(info, DynamicFreeNode address)
+        | isLeft address               = address
+        | dataType info == invalidType = makeErr n $ "Deallocation expected pointer type not " ++ showSub address
+        | otherwise                    = Right info
     
 
 -- Error layering:

@@ -5,6 +5,7 @@ module CompilerShow
 , showFunction
 , showArrayConsts
 , showGlobals
+, showInst
 ) where
 
 import CompilerShared
@@ -77,6 +78,15 @@ showExprTreeLn expr = case getCompose $ unFix expr of
         let header = ["Cast (" ++ showDt tp ++ ") : " ++ show annot]
             subLns = rewriteHead "└─" $ map ("  " ++) $ showExprTreeLn sub
         in  header ++ subLns
+    (annot, DynamicAllocationNode tp sub) ->
+        let header = ["DynamicAlloc (" ++ showDt tp ++ ") : " ++ show annot]
+            subLns = rewriteHead "└─" $ map ("  " ++) $ showExprTreeLn sub
+        in  header ++ subLns
+    (annot, DynamicFreeNode sub) ->
+        let header = ["DynamicFree : " ++ show annot]
+            subLns = rewriteHead "└─" $ map ("  " ++) $ showExprTreeLn sub
+        in  header ++ subLns
+
 
 showExprTree :: Expr -> String
 showExprTree = unlines . showExprTreeLn
@@ -216,30 +226,32 @@ showVarHdr (Temp name tp)  = "temp " ++ name ++ ' ':show tp
 showVarHdr (Input name tp) = "in " ++ name ++ ' ':show tp
 showVarHdr (Local name tp) = "local " ++ name ++ ' ':show tp
 
-instance Show DNAInstruction where
-    show (Mov dst src) = "mov" ++ (' ':show dst) ++ (' ':show src)
-    show (Add dst src1 src2) = "add" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
-    show (Sub dst src1 src2) = "sub" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
-    show (Mul dst src1 src2) = "mul" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
-    show (Div dst src1 src2) = "div" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
-    show (Mod dst src1 src2) = "mod" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
-    show (Cmp lhs rhs) = "cmp" ++ (' ':show lhs) ++ (' ':show rhs)
-    show (Jmp cond lbl) = "j" ++ show cond ++ (' ':lbl)
-    show (Param op tp) = "param" ++ (' ':show op) ++ (' ':show tp)
-    show (Call name output) = "call" ++ (' ':name) ++ (' ':show output)
-    show (ReturnVal value) = "return" ++ (' ':show value)
-    show ReturnVoid = "return $nil"
-    show (ArrayCopy op1 op2 count) = "arraycopy" ++ (' ':show op1) ++ (' ':show op2) ++ (' ':show count)
-    show (IntToFloat op1 op2) = "inttofloat" ++ (' ':show op1) ++ (' ':show op2)
-    show (FloatToInt op1 op2) = "floattoint" ++ (' ':show op1) ++ (' ':show op2)
-    show (Label lbl) = ".label" ++ (' ':lbl)
-    show (Print op) = "print" ++ (' ':show op)
+showInst :: (Show a, Show b) => DNAInstructionF a b -> String
+showInst (Mov dst src) = "mov" ++ (' ':show dst) ++ (' ':show src)
+showInst (Add dst src1 src2) = "add" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+showInst (Sub dst src1 src2) = "sub" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+showInst (Mul dst src1 src2) = "mul" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+showInst (Div dst src1 src2) = "div" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+showInst (Mod dst src1 src2) = "mod" ++ (' ':show dst) ++ (' ':show src1) ++ (' ':show src2)
+showInst (Cmp lhs rhs) = "cmp" ++ (' ':show lhs) ++ (' ':show rhs)
+showInst (Jmp cond lbl) = "j" ++ show cond ++ (' ':lbl)
+showInst (Param op tp) = "param" ++ (' ':show op) ++ (' ':show tp)
+showInst (Call name output) = "call" ++ (' ':name) ++ (' ':show output)
+showInst (ReturnVal value) = "return" ++ (' ':show value)
+showInst ReturnVoid = "return $nil"
+showInst (ArrayCopy op1 op2 count) = "arraycopy" ++ (' ':show op1) ++ (' ':show op2) ++ (' ':show count)
+showInst (IntToFloat op1 op2) = "inttofloat" ++ (' ':show op1) ++ (' ':show op2)
+showInst (FloatToInt op1 op2) = "floattoint" ++ (' ':show op1) ++ (' ':show op2)
+showInst (Label lbl) = ".label" ++ (' ':lbl)
+showInst (Print op) = "print" ++ (' ':show op)
+showInst (Allocate op count) = "dynalloc" ++ (' ':show op) ++ (' ':show count)
+showInst (Deallocate op) = "dynfree" ++ (' ':show op)
 
 showFunction :: DNAFunctionDefinition -> String
 showFunction (name, vars, body) =
     let header = [".sub " ++ name]
         var = map showVarHdr vars
-        bod = map show body
+        bod = map showInst body
         things = [header, var, [".endframe", ".label " ++ name], bod, [".endsub"]]
     in unlines $ concat things
 

@@ -443,24 +443,34 @@ parseForLoop = do
 parseDeclaration :: ParseAction (SyntaxNodeF SyntaxNode)
 parseDeclaration = do
     declBegin <- getLexPosition
-    (typeName, ptrList) <- parseType
-    id <- scanIdentifier
-    arrayList <- parseArraySpec
-    nextTok <- peekToken
-    case nextTok of
-        Operator "=" -> do 
-            eatToken
-            expressionNode <- parseExpression
-            declEnd <- getLexPosition
-            insertSymbol id VarSym
-            let exprAnn = annotExprLoc (SourceLoc declBegin declEnd) expressionNode
-                assnAnn = copyAnnot exprAnn $ AssignmentNode NoOp (annotExprEmpty $ IdentifierNode id) exprAnn
-                assnExprAnn = annotSyntax declBegin declEnd (ExprNode assnAnn)
-                declAnn  = copyAnnot assnExprAnn (DeclarationNode (typeName, arrayList ++ ptrList) id)
-            return $ SeqNode declAnn assnExprAnn
-        _            -> do 
-            insertSymbol id VarSym
-            return $ DeclarationNode (typeName, arrayList ++ ptrList) id
+    typeName <- parseTypename
+    firstDeclaration <- doAnnotateSyntax $ parseDecltrail declBegin typeName
+    declList <- (firstDeclaration:) <$> whileM (punctuationMatches "," <$> peekToken)
+                                               (eatToken >> doAnnotateSyntax (parseDecltrail declBegin typeName))
+    let root = L.foldl1' (\a x -> copyAnnot x $ SeqNode a x) declList
+    return $ SeqNode root (annotSyntaxEmpty EmptyNode)
+  where
+    parseDecltrail :: Int -> String -> ParseAction (SyntaxNodeF SyntaxNode)
+    parseDecltrail declBegin typeName = do
+        ptrList <- parseQualifier
+        id <- scanIdentifier
+        arrayList <- parseArraySpec
+        nextTok <- peekToken
+        case nextTok of
+            Operator "=" -> do 
+                eatToken
+                expressionNode <- parseExpression
+                declEnd <- getLexPosition
+                insertSymbol id VarSym
+                let exprAnn = annotExprLoc (SourceLoc declBegin declEnd) expressionNode
+                    assnAnn = copyAnnot exprAnn $ AssignmentNode NoOp (annotExprEmpty $ IdentifierNode id) exprAnn
+                    assnExprAnn = annotSyntax declBegin declEnd (ExprNode assnAnn)
+                    declAnn  = copyAnnot assnExprAnn (DeclarationNode (typeName, arrayList ++ ptrList) id)
+                return $ SeqNode declAnn assnExprAnn
+            _            -> do 
+                insertSymbol id VarSym
+                return $ DeclarationNode (typeName, arrayList ++ ptrList) id
+
 
 parseReturn :: ParseAction (SyntaxNodeF SyntaxNode)
 parseReturn = do
@@ -731,10 +741,16 @@ parseArraySpec = do
                 return (fromIntegral v)
             _             -> raiseFailureHere "Non-constant/integral size used in array declaration"
 
+parseTypename :: ParseAction String
+parseTypename = scanIdentifier
+
+parseQualifier :: ParseAction [Int]
+parseQualifier = whileM (operatorMatches "*" <$> peekToken) (eatToken $> 0)
+
 parseType :: ParseAction DataType
 parseType = do
     typeName <- scanIdentifier
-    ptrLevels <- whileM (operatorMatches "*" <$> peekToken) (eatToken $> 0)
+    ptrLevels <- parseQualifier
     return (typeName, ptrLevels)
   
 {-
@@ -747,7 +763,8 @@ paramlist = type identifier (',' type identifier)* | ε
 block = '{' stmt* '}'
 stmt = declaration ';' | block | expression ';' | conditional |
        forloop | whileloop | ret ';' | 'continue' ';' | 'break' ';' | print expression ';'
-declaration = type identifier arrayspec optassign
+declaration = typename decl_trail (',' decl_trail)*
+decl_trail = qualifier identifier arrayspec optassign
 optassign = '=' expression | ε
 whileloop = 'while' '(' expression ')' block
 forinit = declaration | assignment | ε
@@ -786,5 +803,4 @@ arraylit = '[' arraylit (',' arraylit) ']' | '[' constant (',' constant)* ']'
 constant = 'true' | 'false' | number
 number = -?[0-9]+\.[0-9]*
 identifier = [A-Za-z][A-Za-z0-9_]*
-[1,2,3,4,5]
 -}
