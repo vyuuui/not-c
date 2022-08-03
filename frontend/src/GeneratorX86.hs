@@ -4,7 +4,16 @@ module GeneratorX86 where
 import CompilerShared hiding (Immediate)
 import Control.Monad.State.Lazy
 import Generator
+import Data.Monoid.Endo
+import Minimal64
 
+type X86Listing = [String]
+type EndoList = Endo X86Listing
+data CodeState = CodeState
+    { codeList :: EndoList
+    , asmIndex :: Int
+    }
+type CodeWriter = State CodeState
 {-
 Design for an x86 generator which is reg-allocator independant:
 goal: Keep the register allocation scheme hidden, auto generate necessary spillage
@@ -53,8 +62,7 @@ translateSubroutine will take a subroutine (params, stackvars, etc), translate i
 -- makeIntOperand v = ImmOp $ Immediate (fromIntegral v :: Int64)
 -- 
 -- translateInstruction
---      :: forall (s :: Size) (r :: Access). IsSize s
---      => DNAInstructionF (Operand r s) (Operand RW s)
+--      :: DNAInstructionF (X86Op s) (X86Op s)
 --      -> CGAction ()
 -- translateInstruction (Mov dest src) = emit $ mov dest src
 -- translateInstruction (Add dest src1 src2) = do emit (mov dest src1 >> add dest src2)

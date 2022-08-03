@@ -13,10 +13,10 @@ module Minimal64
 , ScaleFactor (..)
 , Immediate (..)
 , X86Op (..)
-, X86Listing (..)
-, EndoList (..)
-, CodeState (..)
-, CodeWriter (..)
+--, X86Listing (..)
+--, EndoList (..)
+--, CodeState (..)
+--, CodeWriter (..)
 , JumpCond (..)
 , sizeName
 , imm8

@@ -1,14 +1,15 @@
 module Lexer ( lexStringSingle ) where
 
 import CompilerShared
+import CompilerShow
+import Control.Arrow
+import Data.Int
+import Data.Tuple (swap)
+import Debug.Trace
+import System.IO
 import qualified Data.Set as S
 import qualified Data.List as L
 import qualified Data.Char as C
-import System.IO
-import Debug.Trace
-import Control.Arrow
-import Data.Tuple (swap)
-import CompilerShow
 
 type LexerResult = (Token, Int, String)
 
@@ -73,12 +74,12 @@ lexStringSingle env str = lexStringSingleHelper env str 0
         lexCharConstant str numParsed
             | normHead !! 1 == '\'' &&
               head normHead /= '\'' &&
-              head normHead /= '\\' = (Constant $ CharConstant (head normHead), numParsed + 2, normRest)
-            | take 3 str == "\\n'" = (Constant $ CharConstant '\n', numParsed + 3, escRest)
-            | take 3 str == "\\t'" = (Constant $ CharConstant '\t', numParsed + 3, escRest)
-            | take 3 str == "\\r'" = (Constant $ CharConstant '\r', numParsed + 3, escRest)
-            | take 3 str == "\\\\'" = (Constant $ CharConstant '\\', numParsed + 3, escRest)
-            | take 3 str == "\\''" = (Constant $ CharConstant '\'', numParsed + 3, escRest)
+              head normHead /= '\\' = (Constant $ CharConstant (fromIntegral $ C.ord (head normHead)), numParsed + 2, normRest)
+            | take 3 str == "\\n'" = (Constant $ CharConstant 10, numParsed + 3, escRest)
+            | take 3 str == "\\t'" = (Constant $ CharConstant 9, numParsed + 3, escRest)
+            | take 3 str == "\\r'" = (Constant $ CharConstant 13, numParsed + 3, escRest)
+            | take 3 str == "\\\\'" = (Constant $ CharConstant 92, numParsed + 3, escRest)
+            | take 3 str == "\\''" = (Constant $ CharConstant 39, numParsed + 3, escRest)
             | otherwise            = (Invalid [head str] BadCharStr, numParsed + 1, tail str)
           where
             (escHead, escRest) = splitAt 3 str

@@ -4,7 +4,7 @@ import CompilerShared
 import Control.Arrow
 import Control.Monad
 import Control.Monad.Trans
-import Control.Monad.Trans.State.Lazy ( runState, state, put, get, State )
+import Control.Monad.Trans.State.Lazy (runState, state, put, get, State)
 import Data.Fix
 import Data.Functor.Compose
 import Data.Maybe
@@ -13,7 +13,6 @@ import Validator
 import qualified Data.Char as C
 import qualified Data.List as L
 import qualified Data.Map as M
-import Debug.Trace
 
 opVarRef :: DNAVariable -> DNAOperand
 opVarRef = Variable True
@@ -34,7 +33,6 @@ type TempFreeList = M.Map DNAType [DNAVariable]
 type DNAEnv = M.Map String DNAVariable
 type TempVarList = (TempFreeList, Int)
 type GeneratorAction = State GeneratorState
-type StructMap = M.Map String StructDefinition
 type ConstantMap = M.Map String (DNAType, [Rational])
 
 data GeneratorState = GeneratorState
@@ -271,9 +269,9 @@ generateProgram (globs, structs) =
 
 generateGlobal :: Global -> GeneratorAction DNAFunctionDefinition
 generateGlobal (Function fn) = generateFunction fn
-generateGlobal (GlobalVar var) = case snd $ getCompose $ unFix var of
+generateGlobal (GlobalVar var) = case snd $ decompose var of
     SeqNode decl assn -> do
-        name <- addGlobalDecl $ snd $ getCompose $ unFix decl
+        name <- addGlobalDecl $ snd $ decompose decl
         assignBody <- generateIr assn
         varsList <- map snd <$> (M.toList <$> (localEnv <$> get))
         return ("__init" ++ name, varsList, assignBody ++ [ReturnVoid])
@@ -416,12 +414,12 @@ generateIr = generateIrHelper . snd . getCompose . unFix
         return $ exprBlock ++ [Print resultOp]
 
 generateIrSkipBlock :: SyntaxNode -> GeneratorAction DNABlock
-generateIrSkipBlock node = case snd $ getCompose $ unFix node of
+generateIrSkipBlock node = case snd $ decompose node of
     BlockNode sub -> generateIr sub
     _             -> error "Attempted generateIrSkipBlock on non-block node"
 
 generateIrSyntaxExpr :: SyntaxNode -> GeneratorAction (DNABlock, DNAOperand)
-generateIrSyntaxExpr node = case snd $ getCompose $ unFix node of
+generateIrSyntaxExpr node = case snd $ decompose node of
     ExprNode expr -> generateIrExpr expr
     _             -> error "Attempted generateIrSyntaxExpr on non-expr node"
 
@@ -721,7 +719,7 @@ generateIrExpr = uncurry generateIrExprHelper . first dataType . getCompose . un
             IntConstant v    -> return ([], Immediate (toRational v) $ Int64 1)
             FloatConstant v  -> return ([], Immediate (toRational v) $ Float 1)
             BoolConstant v   -> return ([], Immediate (if v then 1 else 0) $ Int8 1)
-            CharConstant v   -> return ([], Immediate (toRational $ C.ord v) $ Int8 1)
+            CharConstant v   -> return ([], Immediate (toRational v) $ Int8 1)
             StringConstant v -> do
                 let flatten = map (toRational . C.ord) v ++ [0]
                 newGlob <- addGlobal (Int8 (length flatten), flatten)

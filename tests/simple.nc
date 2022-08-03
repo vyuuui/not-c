@@ -1,12 +1,4 @@
-struct joe {
-    int x;
-}
-struct cleary {
-    int y;
-}
 char main() {
-    void* j = no;
-    *j;
-
-    return 'f';
+    int a;
+    int x[a + 10 + 20][50 * 60 / 70];
 }

@@ -4,13 +4,16 @@ import CompilerShared
 import CompilerShow
 import Control.Arrow
 import Control.Monad
-import Control.Monad.Loops ( iterateUntilM, whileM_, whileM, untilM )
+import Control.Monad.Loops (iterateUntilM, whileM_, whileM, untilM)
 import Control.Monad.Trans
 import Control.Monad.Trans.State.Lazy
 import Data.Either
 import Data.Functor
 import Debug.Trace
 import Lexer
+import Data.Fix
+import Data.Functor.Compose
+import Data.Maybe (maybe)
 import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -36,15 +39,15 @@ popSymbolEnv = do
 
 getLexPosition, getPrevLexPosition :: ParseAction Int
 getLexPosition = do
-    (t, rest, (clt, plt)) <- getLexerState
+    (_, _, (clt, _)) <- getLexerState
     return clt
 getPrevLexPosition = do
-    (t, rest, (clt, plt)) <- getLexerState
+    (_, _, (_, plt)) <- getLexerState
     return plt
 
 setCurrentLexStart :: Int -> ParseAction ()
 setCurrentLexStart pos = do
-    ParseState lexer typeEnv globals structs  syms _ <- get
+    ParseState lexer typeEnv globals structs syms _ <- get
     put $ ParseState lexer typeEnv globals structs syms pos
 
 insertSymbol :: String -> SymbolType -> ParseAction ()
@@ -75,39 +78,25 @@ peekToken :: ParseAction Token
 peekToken = do
     (cacheTok, _, _) <- getLexerState
     if null cacheTok
-    then lexNewToken
-    else return $ fst (head cacheTok)
+      then lexNewToken
+      else return $ fst (head cacheTok)
 
 peekTwoToken :: ParseAction (Token, Token)
 peekTwoToken = do
     (cacheTok, _, _) <- getLexerState
     case cacheTok of
         tok1:tok2:restTok -> return (fst tok1, fst tok2)
-        [tok1]            -> do
-            tok2 <- lexNewToken
-            return (fst tok1, tok2)
-        _                 -> do
-            tok1 <- lexNewToken
-            tok2 <- lexNewToken
-            return (tok1, tok2)
+        [tok1]            -> (,) (fst tok1) <$> lexNewToken
+        _                 -> (,) <$> lexNewToken <*> lexNewToken
 
 peekThreeToken :: ParseAction (Token, Token, Token)
 peekThreeToken = do
     (cacheTok, _, _) <- getLexerState
     case cacheTok of
         tok1:tok2:tok3:restTok -> return (fst tok1, fst tok2, fst tok3)
-        [tok1]            -> do
-            tok2 <- lexNewToken
-            tok3 <- lexNewToken
-            return (fst tok1, tok2, tok3)
-        [tok1, tok2]      -> do
-            tok3 <- lexNewToken
-            return (fst tok1, fst tok2, tok3)
-        _                 -> do
-            tok1 <- lexNewToken
-            tok2 <- lexNewToken
-            tok3 <- lexNewToken
-            return (tok1, tok2, tok3)
+        [tok1, tok2]      -> (,,) (fst tok1) (fst tok2) <$> lexNewToken
+        [tok1]            -> (,,) (fst tok1) <$> lexNewToken <*> lexNewToken
+        _                 -> (,,) <$> lexNewToken <*> lexNewToken <*> lexNewToken
 
 -- Generic helpers to validate a token given a predicate (and extract)
 extractStrIfValid :: (Token -> Bool) -> String -> Token -> ParseAction String
@@ -170,13 +159,10 @@ eatOperator val = scanToken >>= validateOperator val
 eatKeyword :: String -> ParseAction ()
 eatKeyword val = scanToken >>= validateKeyword val
 
-
-
 parseProg :: String -> Either FailureInfo Program
-parseProg progStr =
-    fmap (\finalState -> (globalsList finalState, structList finalState)) (execStateT whatToExecute (initialState progStr))
+parseProg progStr = fmap (globalsList &&& structList) (execStateT parseLoop (initialState progStr))
   where
-    whatToExecute = whileM_ (not . isEof <$> peekToken) parseTopLevel
+    parseLoop = whileM_ (not . isEof <$> peekToken) parseTopLevel
 
 parseTopLevel :: ParseAction ()
 parseTopLevel = do
@@ -318,34 +304,20 @@ parseStatement = do
     smap <- getSymbolMap
     env <- getTypeEnv
     if isTypeName smap tok
-      then parseDeclaration >>= \x -> eatPunctuation ";" >> return x
+      then parseDeclaration >>= (eatPunctuation ";" $>)
       else parseStatementLookahead env tok
   where
     parseStatementLookahead :: TypeEnv -> Token -> ParseAction (SyntaxNodeF SyntaxNode)
     parseStatementLookahead env lookahead
         | isBlock lookahead       = parseBlock
-        | isExpression lookahead  = do
-            node <- parseWrapExpression
-            eatPunctuation ";"
-            return node
+        | isExpression lookahead  = parseWrapExpression >>= (eatPunctuation ";" $>)
         | isConditional lookahead = parseCondition
         | isWhileLoop lookahead   = parseWhileLoop
         | isForLoop lookahead     = parseForLoop
-        | isReturn lookahead      = do
-            node <- parseReturn
-            eatPunctuation ";"
-            return node
-        | isEmpty lookahead       = do
-            eatPunctuation ";"
-            return EmptyNode
-        | isContinue lookahead    = do
-            eatControl "continue"
-            eatPunctuation ";"
-            return ContinueNode
-        | isBreak lookahead       = do
-            eatControl "break"
-            eatPunctuation ";"
-            return BreakNode
+        | isReturn lookahead      = parseReturn >>= (eatPunctuation ";" $>)
+        | isEmpty lookahead       = eatPunctuation ";" $> EmptyNode
+        | isContinue lookahead    = eatControl "continue" >> eatPunctuation ";" $> ContinueNode
+        | isBreak lookahead       = eatControl "break" >> eatPunctuation ";" $> ContinueNode
         | isPrint lookahead       = do
             eatKeyword "print"
             expressionNode <- doAnnotateSyntax parseWrapExpression
@@ -584,24 +556,12 @@ parseUnary :: ParseAction (ExprF Expr)
 parseUnary = do
     smap <- symbolMap <$> get
     (op, secondTok) <- peekTwoToken
-    if  | operatorMatches "-" op -> do
-            eatToken
-            UnaryOpNode Negate <$> doAnnotateExpr parseUnary
-        | operatorMatches "!" op -> do
-            eatToken
-            UnaryOpNode Not <$> doAnnotateExpr parseUnary
-        | operatorMatches "&" op -> do
-            eatToken
-            UnaryOpNode Reference <$> doAnnotateExpr parseUnary
-        | operatorMatches "*" op -> do
-            eatToken
-            UnaryOpNode Dereference <$> doAnnotateExpr parseUnary
-        | operatorMatches "++" op -> do
-            eatToken
-            UnaryOpNode PrefixInc <$> doAnnotateExpr parseUnary
-        | operatorMatches "--" op -> do
-            eatToken
-            UnaryOpNode PrefixDec <$> doAnnotateExpr parseUnary
+    if  | operatorMatches "-" op  -> eatToken >> UnaryOpNode Negate <$> doAnnotateExpr parseUnary
+        | operatorMatches "!" op  -> eatToken >> UnaryOpNode Not <$> doAnnotateExpr parseUnary
+        | operatorMatches "&" op  -> eatToken >> UnaryOpNode Reference <$> doAnnotateExpr parseUnary
+        | operatorMatches "*" op  -> eatToken >> UnaryOpNode Dereference <$> doAnnotateExpr parseUnary
+        | operatorMatches "++" op -> eatToken >> UnaryOpNode PrefixInc <$> doAnnotateExpr parseUnary
+        | operatorMatches "--" op -> eatToken >> UnaryOpNode PrefixDec <$> doAnnotateExpr parseUnary
         | punctuationMatches "(" op && isTypeName smap secondTok-> do
             eatToken
             dataType <- parseType
@@ -654,7 +614,6 @@ parseIndirectionTrail root = do
 parseBaseExpr :: ParseAction (ExprF Expr)
 parseBaseExpr = do
     lookahead <- peekToken
-    
     if  | isIdentifier lookahead             -> parseId
         | isConstant lookahead               -> parseConstant
         | keywordMatches "no" lookahead      -> eatToken >> return (LiteralNode NullConstant)
@@ -708,15 +667,14 @@ parseBaseExpr = do
         eatPunctuation ")"
         return $ DynamicFreeNode expr
 
-type ArgumentList = [Expr]
-parseArgList :: ParseAction ArgumentList
+parseArgList :: ParseAction [Expr]
 parseArgList = do
     maybeExpr <- peekToken
     if isExpression maybeExpr
         then doActualParseArgList
         else return []
   where
-    doActualParseArgList :: ParseAction ArgumentList
+    doActualParseArgList :: ParseAction [Expr]
     doActualParseArgList = do
         firstArg <- doAnnotateExpr parseExpression
         (firstArg:) <$> whileM (punctuationMatches "," <$> peekToken) parseCommaArg
@@ -726,6 +684,63 @@ parseArgList = do
             eatToken
             doAnnotateExpr parseExpression
 
+evalConstExpression :: Expr -> Maybe ConstantType
+evalConstExpression = foldFixM (alg . snd . getCompose)
+  where
+    alg :: ExprF ConstantType -> Maybe ConstantType
+    alg (LiteralNode val)         = Just val
+    alg (ParenthesisNode sub)     = Just sub
+    alg (BinaryOpNode op lhs rhs) = computeBOp op lhs rhs
+    alg (UnaryOpNode op sub)      = computeUOp op sub
+    alg (CastNode tp sub)         = computeCast tp sub
+    alg _ = Nothing
+    computeCast :: DataType -> ConstantType -> Maybe ConstantType
+    computeCast tp val
+        | tp == charType  = Just val
+        | tp == shortType = Just val
+        | tp == intType   = Just val
+        | tp == longType  = Just val
+        | tp == floatType = Just val
+        | tp == boolType  = Just val
+        | otherwise = Nothing
+    computeUOp :: UnaryOp -> ConstantType -> Maybe ConstantType
+    computeUOp Negate val = case val of
+        FloatConstant f1 -> Just $ FloatConstant (negate f1)
+        IntConstant i1   -> Just $ IntConstant (negate i1)
+        CharConstant c1  -> Just $ CharConstant (negate c1)
+        _ -> Nothing
+    computeUOp Not val = case val of
+        BoolConstant b1 -> Just $ BoolConstant (not b1)
+        _ -> Nothing
+    computeUOp _ _ = error "Bad UOp fuck"
+    computeBOp :: BinaryOp -> ConstantType -> ConstantType -> Maybe ConstantType
+    computeBOp Addition lhs rhs = numCall (+) lhs rhs
+    computeBOp Subtraction lhs rhs = numCall (-) lhs rhs
+    computeBOp Multiplication lhs rhs = numCall (*) lhs rhs
+    computeBOp Division lhs rhs = case (lhs, rhs) of
+        (FloatConstant f1, FloatConstant f2) -> Just $ FloatConstant (f1 / f2)
+        (IntConstant i1, IntConstant i2)     -> Just $ IntConstant (i1 `div` i2)
+        (CharConstant c1, CharConstant c2)   -> Just $ CharConstant (c1 `div` c2)
+        _ -> Nothing
+    computeBOp Modulus lhs rhs = case (lhs, rhs) of
+        (IntConstant i1, IntConstant i2)   -> Just $ IntConstant (i1 `mod` i2)
+        (CharConstant c1, CharConstant c2) -> Just $ CharConstant (c1 `mod` c2)
+        _ -> Nothing
+    computeBOp Equal lhs rhs = cmpCall (==) lhs rhs
+    computeBOp NotEqual lhs rhs = cmpCall (/=) lhs rhs
+    computeBOp LessThan lhs rhs = cmpCall (<) lhs rhs
+    computeBOp GreaterThan lhs rhs = cmpCall (>) lhs rhs
+    computeBOp GreaterThanOrEqual lhs rhs = cmpCall (>=) lhs rhs
+    computeBOp LessThanOrEqual lhs rhs = cmpCall (<=) lhs rhs
+    computeBOp Or lhs rhs = boolCall (||) lhs rhs
+    computeBOp And lhs rhs = boolCall (&&) lhs rhs
+
+parseConstantExpression :: ParseAction ConstantType
+parseConstantExpression = do
+    expr <- doAnnotateExpr parseExpression
+    maybe (raiseFailureLoc "Invalid constant expression" (sourceLocOf expr)) return (evalConstExpression expr) 
+    
+
 parseArraySpec :: ParseAction [Int]
 parseArraySpec = do
     whileM (punctuationMatches "[" <$> peekToken) parseArrayDecl
@@ -733,7 +748,7 @@ parseArraySpec = do
     parseArrayDecl :: ParseAction Int
     parseArrayDecl = do
         eatPunctuation "["
-        constant <- scanConstant
+        constant <- parseConstantExpression
         case constant of
             IntConstant v -> do
                 eatPunctuation "]"
@@ -773,6 +788,7 @@ forloop = 'for' '(' forinit ';' forexpr ';' forexpr ')' block
 conditional = 'if' '(' expression ')' block elseconditional
 elseconditional = 'else' 'if' block elseconditional | 'else' block | ε
 ret = 'return' expression
+constant_expression = expression
 expression = assignment
 assignment = lvalue '=' assignment  | lvalue '+=' assignment |
              lvalue '-=' assignment | lvalue '*=' assignment |
@@ -798,8 +814,8 @@ baseexpr = identifier | constant | arraylit | '(' expression ')' |
 arglist = expression (',' expression)* | ε
 type = identifier qualifier
 qualifier = '*'*
-arrayspec = '[' constant ']'*
-arraylit = '[' arraylit (',' arraylit) ']' | '[' constant (',' constant)* ']'
+arrayspec = '[' constant_expression ']'*
+arraylit = '[' arraylit (',' arraylit) ']' | '[' constant_expression (',' constant_expression)* ']'
 constant = 'true' | 'false' | number
 number = -?[0-9]+\.[0-9]*
 identifier = [A-Za-z][A-Za-z0-9_]*

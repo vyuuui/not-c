@@ -1,14 +1,19 @@
 {-# LANGUAGE TupleSections #-}
-{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable #-}
+{-# LANGUAGE RankNTypes #-}
+
 module CompilerShared where
 
 import Control.Arrow (arr, first, (>>>), (&&&), ArrowChoice)
+import Control.Monad (join, unless)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.State.Lazy (StateT)
+import Data.Char (ord, chr)
 import Data.Fix (Fix(..), unFix)
 import Data.Functor.Classes ()
 import Data.Functor.Compose (Compose(..), getCompose)
-import Data.Maybe (maybe)
+import Data.Int
+import Data.Maybe (maybe, isJust)
 import Data.Tuple (swap)
 import qualified Data.List as L
 import qualified Data.Map as M
@@ -37,10 +42,19 @@ seqPair (mFirst, mSecond) = (,) <$> mFirst <*> mSecond
 seqTrip :: Monad m => (m a, m b, m c) -> m (a, b, c)
 seqTrip (mFirst, mSecond, mThird) = (,,) <$> mFirst <*> mSecond <*> mThird
 
+unlessM :: Monad m => m Bool -> m () -> m ()
+unlessM test def = test >>= (`unless` def)
+
+decompose :: Functor f => Fix (Compose ((,) a) f) -> (a, f (Fix (Compose ((,) a) f)))
+decompose = getCompose . unFix
+
+opChar :: (Int -> Int -> Int) -> Char -> Char -> Char
+opChar op c1 c2 = chr (ord c1 `op` ord c2)
+
 ---------
 -- Tokens
 data ConstantType
-    = CharConstant Char
+    = CharConstant Int8
     | IntConstant Int
     | FloatConstant Float
     | BoolConstant Bool
@@ -66,6 +80,22 @@ data InvalidReason
     | BadCharStr deriving (Eq, Show)
 
 type TokenPos = (Token, Int)
+
+numCall :: (forall a. (Num a) => a -> a -> a) -> ConstantType -> ConstantType -> Maybe ConstantType
+numCall f (CharConstant c0) (CharConstant c1) = Just $ CharConstant (c0 `f` c1)
+numCall f (IntConstant i0) (IntConstant i1) = Just $ IntConstant (i0 `f` i1)
+numCall f (FloatConstant f0) (FloatConstant f1) = Just $ FloatConstant (f0 `f` f1)
+numCall _ _ _ = Nothing
+
+boolCall :: (Bool -> Bool -> Bool) -> ConstantType -> ConstantType -> Maybe ConstantType
+boolCall f (BoolConstant b0) (BoolConstant b1) = Just $ BoolConstant (b0 `f` b1)
+boolCall _ _ _ = Nothing
+
+cmpCall :: (forall a. (Ord a) => a -> a -> Bool) -> ConstantType -> ConstantType -> Maybe ConstantType
+cmpCall f (CharConstant c0) (CharConstant c1) = Just $ BoolConstant (c0 `f` c1)
+cmpCall f (IntConstant i0) (IntConstant i1) = Just $ BoolConstant (i0 `f` i1)
+cmpCall f (FloatConstant f0) (FloatConstant f1) = Just $ BoolConstant (f0 `f` f1)
+cmpCall _ _ _ = Nothing
 
 isIdentifier, isConstant, isOperator, isControl, isPunctuation, isEof, isInvalid, isKeyword :: Token -> Bool
 isIdentifier (Identifier _) = True
@@ -189,7 +219,7 @@ data ExprF r
     | CastNode DataType r
     | DynamicAllocationNode DataType r
     | DynamicFreeNode r
-    deriving (Functor)
+    deriving (Functor, Foldable, Traversable)
 
 data BinaryOp
     = Addition
@@ -402,3 +432,25 @@ data DNAInstructionF r w
     | Deallocate r
     | Label String
     | Print r
+
+data VarInfo
+    = FunctionVar DataType [(DataType, String)]
+    | PrimitiveVar DataType
+    | StructVar DataType
+    deriving Show
+type VarInfoMap = M.Map String VarInfo
+data EnvBlock = EnvBlock { inLoop :: Bool, varMap :: VarInfoMap } deriving Show
+type ValidationEnv = [EnvBlock]
+type StructMap = M.Map String StructDefinition
+
+lookupVar :: String -> ValidationEnv -> Maybe VarInfo
+lookupVar id = join . L.find isJust . map (M.lookup id . varMap)
+
+envInLoop :: ValidationEnv -> Bool
+envInLoop = any inLoop
+    
+isPrimitiveType :: DataType -> Bool
+isPrimitiveType (typename, _) = S.member typename baseTypes
+
+isStructType :: DataType -> StructMap -> Bool
+isStructType (typename, _) = M.member typename
